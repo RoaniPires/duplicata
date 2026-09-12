@@ -1,0 +1,34 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Saída de build local do MSI (nunca distribuível — ver installer/README.md)
+/installer/bin/
+
+# Cache local de extensões do WiX Toolset (`wix extension add`) — por
+# máquina/diretório, não versionado, mesma categoria de /target/.
+/.wix/
+
+# Cobertura
+/lcov.info
+/*.profraw
+**/*.profraw
+
+# Editores / SO
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Ambiente
+.env
+.env.*
+
+# NÃO ignorar: Cargo.lock (workspace com binário — trava as versões exatas)
+!Cargo.lock
+
+# Scripts de apoio dos ícones (assets/tools) — só o fonte .py é versionado.
+__pycache__/
+*.pyc

@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build do binário de release
+        run: cargo build --release -p duplicata-app
+
+      - name: Instalar WiX Toolset (dotnet tool)
+        run: dotnet tool install --global wix
+
+      - name: Aceitar o EULA do WiX (Open Source Maintenance Fee)
+        run: wix eula accept wix7
+
+      - name: Adicionar a extensão WixToolset.Util.wixext (WixShellExec, FR-002a)
+        run: wix extension add WixToolset.Util.wixext
+
+      - name: Empacotar o MSI
+        shell: bash
+        run: |
+          set -e
+          sha_short=$(git rev-parse --short HEAD)
+          echo "GIT_SHA_SHORT=$sha_short" >> "$GITHUB_ENV"
+          wix build installer/duplicata.wxs \
+            -ext WixToolset.Util.wixext \
+            -d DuplicataExePath="target/release/duplicata.exe" \
+            -o "installer/bin/duplicata-$sha_short-nao-assinado.msi"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duplicata-msi-${{ env.GIT_SHA_SHORT }}
+          path: installer/bin/*.msi
+          if-no-files-found: error
+
+      - name: Gerar atestado de procedência
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "installer/bin/*.msi"
+
+      - name: Publicar a release com o aviso do PG-003
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh release create "${{ github.ref_name }}" \
+            "installer/bin/duplicata-$GIT_SHA_SHORT-nao-assinado.msi" \
+            --draft \
+            --title "duplicata $GIT_SHA_SHORT (não assinado)" \
+            --notes "⚠️ **Artefato NÃO assinado** (nenhum certificado Authenticode) — não destinado à distribuição pública ampla (PG-003). Construído pela CI a partir do commit \`$GIT_SHA_SHORT\` deste repositório; nunca enviado manualmente (FR-005c). Antes de instalar, veja SECURITY.md (na raiz do repositório, neste commit) para verificar a procedência (atestado publicado por esta mesma execução, FR-027/028)."

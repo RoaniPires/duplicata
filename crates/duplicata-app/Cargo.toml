@@ -1,0 +1,40 @@
+[package]
+name = "duplicata-app"
+description = "Binário do duplicata: fiação (bootstrap + message loop + worker thread) e observabilidade (tracing). Sem lógica de decisão."
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "duplicata_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "duplicata"
+path = "src/main.rs"
+
+[dependencies]
+duplicata-core.workspace = true
+duplicata-store.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+duplicata-win.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
+
+[dev-dependencies]
+tempfile.workspace = true
+image.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

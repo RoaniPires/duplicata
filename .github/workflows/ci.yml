@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-deny
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - name: Árvore de deps de `image` em duplicata-core restrita a bmp+png (research.md R1, Fatia 2)
+        shell: bash
+        run: |
+          set -e
+          echo "--- image só entra via duplicata-core ---"
+          cargo tree -p duplicata-core -i image --edges normal
+          echo "--- dependências reais da crate image ---"
+          tree=$(cargo tree -p image --edges normal)
+          echo "$tree"
+          if echo "$tree" | grep -qE -- '-sys(\s|$|@)|openexr|dav1d|libwebp|zune-jpeg|jpeg[-_]decoder|ravif|\bqoi\b|\btiff\b|\bgif\b|\bexr\b|\bhdr\b|avif'; then
+            echo "::error::image trouxe um codec/dependência além de bmp+png (ou algo com binding C) — ver research.md R1. Confirme default-features=false e features=[\"bmp\",\"png\"] no Cargo.toml raiz."
+            exit 1
+          fi
+          echo "OK: árvore de image restrita a bmp+png, 100% Rust."
+      - name: Cobertura de duplicata-core (>= 90%)
+        run: cargo llvm-cov --package duplicata-core --all-features --fail-under-lines 90
+      - run: cargo deny check bans licenses sources advisories
+
+  core-portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --package duplicata-core --all-features
+
+  no-hooks-no-polling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Proibir SetWindowsHookEx / WH_KEYBOARD_LL / timers periódicos
+        run: |
+          set -e
+          pattern='SetWindowsHookEx|WH_KEYBOARD_LL|WH_KEYBOARD\b|SetTimer\(|KillTimer\(|timeBeginPeriod|timeSetEvent'
+          if grep -rEn "$pattern" crates/; then
+            echo "::error::Uso proibido (hook global de teclado ou timer periódico) — ver constituição Princípio V."
+            exit 1
+          fi
+          echo "OK: nenhum hook global de teclado nem timer periódico."
+
+  wxs-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/check_wxs_invariants.py installer/duplicata.wxs
+
+  no-force-kill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Proibir TerminateProcess (ou equivalente de encerrar à força)
+        run: |
+          set -e
+          pattern='TerminateProcess|process::abort'
+          if grep -rEn "$pattern" crates/duplicata-win crates/duplicata-app; then
+            echo "::error::Encerramento forçado de processo encontrado em duplicata-win/duplicata-app — proibido pelo FR-024b (ver installer-contract.md §3: só --request-shutdown, sem force-kill)."
+            exit 1
+          fi
+          echo "OK: nenhum TerminateProcess (ou equivalente) em duplicata-win/duplicata-app."

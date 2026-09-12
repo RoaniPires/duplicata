@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/duplicata-core",
+    "crates/duplicata-store",
+    "crates/duplicata-win",
+    "crates/duplicata-app",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.83"
+version = "0.1.0"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+duplicata-core = { path = "crates/duplicata-core", version = "0.1.0" }
+duplicata-store = { path = "crates/duplicata-store", version = "0.1.0" }
+duplicata-win = { path = "crates/duplicata-win", version = "0.1.0" }
+
+blake3 = "1.8.7"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "png"] }
+windows = "0.62.2"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+tracing-appender = "0.2.5"
+
+tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = "debuginfo"
