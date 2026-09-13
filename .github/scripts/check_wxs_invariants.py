@@ -56,8 +56,24 @@ def main() -> None:
             "deixar o histórico protegido ilegível."
         )
 
+    media = root.find(".//w:Media", NS)
+    if media is None:
+        fail(
+            "elemento <Media> ausente — sem EmbedCab=\"yes\" explícito o "
+            "cabinet sai externo ao lado do .msi; quem distribuir só o .msi "
+            "da release quebra a instalação com 'Source file not found'."
+        )
+    if media.get("EmbedCab") != "yes":
+        fail(
+            f"Media/@EmbedCab é {media.get('EmbedCab')!r}, esperado 'yes' — "
+            "sem isso o instalador gera um cabinet externo (ex.: cab1.cab) "
+            "ao lado do .msi; quem baixar só o .msi da release não consegue "
+            "instalar."
+        )
+
     print("OK: Package/@Scope=perUser, nenhum ServiceInstall/ServiceControl, "
-          "Restart Manager desabilitado, MajorUpgrade recusa downgrade.")
+          "Restart Manager desabilitado, MajorUpgrade recusa downgrade, "
+          "cabinet embutido no .msi.")
 
 
 if __name__ == "__main__":

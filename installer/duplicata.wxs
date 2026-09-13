@@ -10,6 +10,8 @@
     Scope="perUser"
     InstallerVersion="500">
 
+        <Media Id="1" Cabinet="duplicata.cab" EmbedCab="yes" />
+
         <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
 
     
