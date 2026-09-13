@@ -1,16 +1,16 @@
 # Procedência do artefato publicado
 
 Como confirmar, a partir só deste repositório público e do artefato
-publicado, que um `duplicata-<sha>.msi` específico veio exatamente deste
+publicado, que um `duplicata-<versão>.msi` específico veio exatamente deste
 código-fonte — sem contato com o mantenedor, sem acesso privilegiado, sem
 conta em serviço nenhum (research.md R7, FR-027/028/029/030).
 
-Nome do arquivo: os artefatos publicados hoje carregam o SHA curto do commit
-no nome (`duplicata-<sha>.msi`, não um número de versão "polido") — é a
-marcação de que ainda não são destinados à distribuição pública ampla (não
-assinados com certificado Authenticode, PG-003). Servem para quem já sabe o
-que está buscando: quem recebeu o link de alguém confiável, ou quem está
-auditando o projeto.
+Nome do arquivo: os artefatos publicados carregam a versão no nome
+(`duplicata-<versão>.msi`, ex.: `duplicata-0.1.1.msi`) — legível para quem
+baixa, sem precisar saber o SHA do commit. O artefato **não é assinado** com
+certificado Authenticode (PG-003); esse aviso está nas notas de cada release
+e nesta página, não mais codificado no nome do arquivo. Antes de instalar,
+confirme a procedência pelo atestado (passo a passo abaixo).
 
 ## O que a esteira publica
 
@@ -38,7 +38,7 @@ winget install sigstore.cosign
 1. Baixe o MSI da release e calcule o hash SHA-256:
 
    ```powershell
-   Get-FileHash .\duplicata-<sha>.msi -Algorithm SHA256
+   Get-FileHash .\duplicata-<versão>.msi -Algorithm SHA256
    ```
 
 2. Busque a lista de atestados desse hash no endpoint público do GitHub —
@@ -47,7 +47,7 @@ winget install sigstore.cosign
    200 sem qualquer cabeçalho de autenticação):
 
    ```powershell
-   $hash = (Get-FileHash .\duplicata-<sha>.msi -Algorithm SHA256).Hash.ToLower()
+   $hash = (Get-FileHash .\duplicata-<versão>.msi -Algorithm SHA256).Hash.ToLower()
    curl.exe -s "https://api.github.com/repos/RoaniPires/duplicata/attestations/sha256:$hash" -o attestations.json
    ```
 
@@ -91,7 +91,7 @@ winget install sigstore.cosign
      --new-bundle-format `
      --certificate-oidc-issuer="https://token.actions.githubusercontent.com" `
      --certificate-identity-regexp="^https://github.com/RoaniPires/duplicata/.github/workflows/release.yml.?" `
-     .\duplicata-<sha>.msi
+     .\duplicata-<versão>.msi
    ```
 
    - **Sucesso**: `cosign` confirma a assinatura, a entrada no Rekor e que o
@@ -136,7 +136,7 @@ Quem já usa o GitHub CLI (`gh`) pode preferir um único comando, que já
 resolve os passos 2–4 internamente (inclusive a descompressão do bundle):
 
 ```powershell
-gh attestation verify .\duplicata-<sha>.msi --repo RoaniPires/duplicata
+gh attestation verify .\duplicata-<versão>.msi --repo RoaniPires/duplicata
 ```
 
 Não é o caminho **principal** documentado aqui: o fluxo padrão do `gh`

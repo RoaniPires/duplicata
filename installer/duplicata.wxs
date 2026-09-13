@@ -5,7 +5,7 @@
     <Package
     Name="duplicata"
     Manufacturer="duplicata"
-    Version="0.1.0.0"
+    Version="$(var.ProductVersion)"
     UpgradeCode="8A8BC285-7C38-48C3-915B-5666902B88C3"
     Scope="perUser"
     InstallerVersion="500">

@@ -24,6 +24,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Conferir a versão (tag vs. Cargo.toml) e derivar VERSION
+        shell: bash
+        run: |
+          set -e
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$cargo_version" ]; then
+              echo "::error::Versão da tag (${GITHUB_REF_NAME}, => $tag_version) diverge da versão em Cargo.toml ($cargo_version). Atualize [workspace.package].version antes de taguear, ou apague e retagueie depois de corrigir — senão o MSI sai com a versão errada (ARPDISPLAYVERSION, tray, e o motor do MSI nem reconhece a atualização como upgrade)."
+              exit 1
+            fi
+          fi
+          echo "VERSION=$cargo_version" >> "$GITHUB_ENV"
+
       - name: Build do binário de release
         run: cargo build --release -p duplicata-app
 
@@ -45,7 +59,8 @@ jobs:
           wix build installer/duplicata.wxs \
             -ext WixToolset.Util.wixext \
             -d DuplicataExePath="target/release/duplicata.exe" \
-            -o "installer/bin/duplicata-$sha_short-nao-assinado.msi"
+            -d ProductVersion="$VERSION.0" \
+            -o "installer/bin/duplicata-$VERSION.msi"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -66,7 +81,7 @@ jobs:
         run: |
           set -e
           gh release create "${{ github.ref_name }}" \
-            "installer/bin/duplicata-$GIT_SHA_SHORT-nao-assinado.msi" \
+            "installer/bin/duplicata-$VERSION.msi" \
             --draft \
             --title "duplicata $GIT_SHA_SHORT (não assinado)" \
             --notes "⚠️ **Artefato NÃO assinado** (nenhum certificado Authenticode) — não destinado à distribuição pública ampla (PG-003). Construído pela CI a partir do commit \`$GIT_SHA_SHORT\` deste repositório; nunca enviado manualmente (FR-005c). Antes de instalar, veja SECURITY.md (na raiz do repositório, neste commit) para verificar a procedência (atestado publicado por esta mesma execução, FR-027/028)."
