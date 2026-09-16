@@ -1,16 +1,21 @@
 #![cfg(windows)]
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use duplicata_core::canonical::{CF_BITMAP, CF_DIB, CF_UNICODETEXT};
 use duplicata_core::{CaptureOutcome, ClipboardSource, Config, RejectReason};
 use duplicata_win::WinClipboard;
-use windows::Win32::Foundation::{HANDLE, HWND};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::CreateBitmap;
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, HWND_MESSAGE, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_RENDERALLFORMATS, WM_RENDERFORMAT, WNDCLASSW, WNDPROC, WS_POPUP,
 };
 
 fn cfg() -> Config {
@@ -83,6 +88,299 @@ fn utf16le_with_nul(s: &str) -> Vec<u8> {
         .flat_map(|u| u.to_le_bytes())
         .chain([0, 0])
         .collect()
+}
+
+/// Quantas vezes o dono sintético foi intimado a renderizar.
+///
+/// Estático de processo: os testes que o leem exigem `--test-threads=1`, que é
+/// como o AGENTS manda rodar os `#[ignore]` deste crate.
+static RENDER_REQUESTS: AtomicU32 = AtomicU32::new(0);
+
+/// Dono de clipboard que anuncia com renderização adiada e nunca renderiza.
+///
+/// Só conta os pedidos: é a instrumentação do teste. Responder ao
+/// `WM_RENDERFORMAT` não interessa aqui — o que se mede é SE ele chega.
+extern "system" fn counting_owner_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_RENDERFORMAT || msg == WM_RENDERALLFORMATS {
+        RENDER_REQUESTS.fetch_add(1, Ordering::SeqCst);
+        return LRESULT(0);
+    }
+    // SAFETY: repassa o resto ao handler padrão.
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// O texto que o dono que RENDERIZA de verdade entrega quando intimado.
+const TEXTO_RENDERIZADO: &str = "conteudo que so existe quando pedido";
+
+/// Id do segundo formato adiado, registrado em [`publish_two_delayed_formats_that_render`].
+static SEGUNDO_FORMATO: AtomicU32 = AtomicU32::new(0);
+
+/// Dono de clipboard que anuncia com renderização adiada e **entrega** quando
+/// intimado — o comportamento de uma ponte WSL/RDP que funciona.
+///
+/// Responder ao `WM_RENDERFORMAT` é `SetClipboardData` de dentro do handler,
+/// sem abrir o clipboard (quem pediu já o tem aberto). É esse
+/// `SetClipboardData` que, no desenho antigo, caía no meio do laço de
+/// `EnumClipboardFormats` de quem estava lendo.
+extern "system" fn rendering_owner_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_RENDERFORMAT {
+        RENDER_REQUESTS.fetch_add(1, Ordering::SeqCst);
+        let format_id = wparam.0 as u32;
+        let bytes = if format_id == CF_UNICODETEXT {
+            utf16le_with_nul(TEXTO_RENDERIZADO)
+        } else {
+            b"carga auxiliar".to_vec()
+        };
+        if let Some(hglobal) = hglobal_copy(&bytes) {
+            // SAFETY: resposta ao WM_RENDERFORMAT — `SetClipboardData` aqui é
+            // feito SEM abrir o clipboard, como a API exige do dono adiado.
+            unsafe {
+                let _ =
+                    SetClipboardData(format_id, Some(HANDLE(hglobal as *mut core::ffi::c_void)));
+            }
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_RENDERALLFORMATS {
+        RENDER_REQUESTS.fetch_add(1, Ordering::SeqCst);
+        return LRESULT(0);
+    }
+    // SAFETY: repassa o resto ao handler padrão.
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Cria uma janela message-only da classe dada, registrando-a se preciso.
+fn create_owner_window(class_name: windows::core::PCWSTR, wndproc: WNDPROC) -> HWND {
+    // SAFETY: registro de classe idempotente com wndproc válido; ignoramos o
+    // erro de "classe já registrada" porque vários testes deste arquivo podem
+    // registrá-la.
+    unsafe {
+        let hinstance = GetModuleHandleW(None).expect("GetModuleHandleW falhou");
+        let wc = WNDCLASSW {
+            lpfnWndProc: wndproc,
+            hInstance: hinstance.into(),
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            windows::core::w!(""),
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .expect("CreateWindowExW do dono sintético falhou")
+    }
+}
+
+/// Anuncia os formatos com renderização adiada, com `hwnd` como dono.
+///
+/// `SetClipboardData(fmt, NULL)` é o anúncio sem dados: os bytes só existem
+/// quando alguém chama `GetClipboardData` e o dono responde ao
+/// `WM_RENDERFORMAT`. É assim que uma ponte de clipboard entre máquinas (RDP,
+/// WSL) publica — e é o caso que a ordem das fases precisa respeitar.
+fn announce_delayed(hwnd: HWND, formats: &[u32]) {
+    // SAFETY: `OpenClipboard(Some(hwnd))` + `EmptyClipboard` tornam esta janela
+    // a DONA do clipboard, que é o que faz o Windows mandar `WM_RENDERFORMAT`
+    // para ela. `SetClipboardData` com handle nulo é o anúncio adiado — o
+    // Result é ignorado de propósito: o valor de retorno de um anúncio adiado é
+    // o próprio handle nulo, então "erro" aqui não distingue falha de sucesso;
+    // quem confirma a publicação é o `IsClipboardFormatAvailable` abaixo.
+    unsafe {
+        OpenClipboard(Some(hwnd)).expect("OpenClipboard falhou — outro processo com o clipboard?");
+        EmptyClipboard().expect("EmptyClipboard falhou");
+        for format_id in formats {
+            let _ = SetClipboardData(*format_id, None);
+        }
+        let _ = CloseClipboard();
+    }
+
+    for format_id in formats {
+        // SAFETY: consulta de disponibilidade, sem clipboard aberto e sem
+        // handle — não obtém dado nenhum, logo não dispara renderização.
+        let anunciado = unsafe { IsClipboardFormatAvailable(*format_id) }.is_ok();
+        assert!(anunciado, "formato adiado {format_id} não foi anunciado");
+    }
+    RENDER_REQUESTS.store(0, Ordering::SeqCst);
+}
+
+/// Dono que anuncia CF_UNICODETEXT adiado e nunca renderiza.
+fn publish_delayed_render_text() -> HWND {
+    let hwnd = create_owner_window(
+        windows::core::w!("duplicata_teste_dono_render_adiado"),
+        Some(counting_owner_wndproc),
+    );
+    announce_delayed(hwnd, &[CF_UNICODETEXT]);
+    hwnd
+}
+
+/// Dono que anuncia DOIS formatos adiados e renderiza os dois quando intimado.
+///
+/// Dois formatos, e não um, porque é isso que torna o teste discriminante: com
+/// um formato só, a enumeração acabaria logo depois do primeiro
+/// `GetClipboardData` e a modificação do clipboard no meio dela não teria
+/// consequência observável.
+fn publish_two_delayed_formats_that_render() -> HWND {
+    // SAFETY: `RegisterClipboardFormatW` só registra/consulta um id junto ao
+    // sistema — nenhuma pré-condição de clipboard aberto.
+    let segundo =
+        unsafe { RegisterClipboardFormatW(windows::core::w!("duplicata Teste Formato Adiado")) };
+    assert!(segundo != 0, "RegisterClipboardFormatW falhou");
+    SEGUNDO_FORMATO.store(segundo, Ordering::SeqCst);
+
+    let hwnd = create_owner_window(
+        windows::core::w!("duplicata_teste_dono_que_renderiza"),
+        Some(rendering_owner_wndproc),
+    );
+    announce_delayed(hwnd, &[CF_UNICODETEXT, segundo]);
+    hwnd
+}
+
+/// Solta a posse do clipboard antes de destruir a janela dona, para que o
+/// Windows não peça `WM_RENDERALLFORMATS` na destruição e contamine a contagem
+/// de um teste seguinte.
+fn release_clipboard_and_window(hwnd: HWND) {
+    // SAFETY: `OpenClipboard(None)` + `EmptyClipboard` zeram a posse; depois a
+    // janela pode ser destruída sem obrigação de renderizar.
+    unsafe {
+        if OpenClipboard(None).is_ok() {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
+        }
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+#[test]
+#[ignore = "precisa de sessão gráfica com clipboard; sobrescreve o clipboard atual"]
+fn a_rejected_capture_never_asks_a_delayed_render_owner_to_produce_the_bytes() {
+    // Este é o invariante da correção. Com o desenho antigo, `GetClipboardData`
+    // rodava na fase de enumeração — antes de qualquer filtro — e obrigava o
+    // dono a materializar os bytes mesmo quando a captura ia ser recusada.
+    //
+    // Com as fases separadas, uma recusa por programa bloqueado acontece só com
+    // id, nome e dono: ZERO pedidos de renderização.
+    let hwnd = publish_delayed_render_text();
+    let this_exe = std::env::current_exe().expect("current_exe() falhou");
+    let this_exe_name = this_exe
+        .file_name()
+        .expect("current_exe() sem nome de arquivo")
+        .to_string_lossy()
+        .into_owned();
+
+    let outcome = WinClipboard.try_capture(&cfg_with_blocked(&this_exe_name));
+
+    let pedidos = RENDER_REQUESTS.load(Ordering::SeqCst);
+    release_clipboard_and_window(hwnd);
+
+    match outcome {
+        Ok(CaptureOutcome::Rejected(RejectReason::BlockedProgram)) => {}
+        other => panic!("esperava Rejected(BlockedProgram), obtido {other:?}"),
+    }
+    assert_eq!(
+        pedidos, 0,
+        "captura recusada não pode disparar WM_RENDERFORMAT — os filtros rodam \
+         antes de qualquer byte ser materializado"
+    );
+}
+
+#[test]
+#[ignore = "precisa de sessão gráfica com clipboard; sobrescreve o clipboard atual"]
+fn an_approved_capture_does_ask_the_owner_for_the_bytes() {
+    // A contraparte do teste acima: aprovada a captura, a fase 3 pede os bytes.
+    // Sem isso, "zero pedidos" seria satisfeito por um app que simplesmente não
+    // captura mais nada.
+    //
+    // O dono sintético não responde, então nenhum formato é entregue e o
+    // desfecho é `Empty`.
+    let hwnd = publish_delayed_render_text();
+
+    let outcome = WinClipboard.try_capture(&cfg());
+
+    let pedidos = RENDER_REQUESTS.load(Ordering::SeqCst);
+    release_clipboard_and_window(hwnd);
+
+    assert!(
+        pedidos >= 1,
+        "captura aprovada precisa pedir os bytes na fase 3; obtido {pedidos} pedidos"
+    );
+    match outcome {
+        Ok(CaptureOutcome::Empty) => {}
+        other => panic!(
+            "dono que não renderiza não entrega formato nenhum: esperava Empty, obtido {other:?}"
+        ),
+    }
+}
+
+#[test]
+#[ignore = "precisa de sessão gráfica com clipboard; sobrescreve o clipboard atual"]
+fn a_delayed_render_owner_with_two_formats_is_captured_whole() {
+    // Teste de CARACTERIZAÇÃO, não de regressão — e a distinção foi medida, não
+    // suposta.
+    //
+    // Um dono anuncia dois formatos adiados e renderiza os dois quando
+    // intimado: é a forma de uma ponte WSL/RDP que funciona. Rodando este teste
+    // contra o desenho ANTIGO (só os `src` revertidos, este arquivo mantido),
+    // ele PASSA. Ou seja: o `SetClipboardData` que caía no meio do laço de
+    // `EnumClipboardFormats` não truncou a enumeração neste Windows, e este
+    // teste não reproduz o defeito do usuário.
+    //
+    // O que ele prende é o caminho feliz completo do dono adiado: os dois
+    // formatos chegam, e os bytes do canônico são os que o dono renderizou. Se
+    // uma mudança futura quebrar a captura de renderização adiada, este teste
+    // acusa.
+    let hwnd = publish_two_delayed_formats_that_render();
+    let segundo = SEGUNDO_FORMATO.load(Ordering::SeqCst);
+
+    let outcome = WinClipboard.try_capture(&cfg());
+
+    let pedidos = RENDER_REQUESTS.load(Ordering::SeqCst);
+    release_clipboard_and_window(hwnd);
+
+    let Ok(CaptureOutcome::Copied {
+        formats,
+        canonical_index,
+    }) = outcome
+    else {
+        panic!("esperava Copied de um dono adiado que renderiza, obtido {outcome:?}");
+    };
+
+    assert_eq!(
+        formats[canonical_index].format_id, CF_UNICODETEXT,
+        "o canônico é o texto"
+    );
+    assert_eq!(
+        formats[canonical_index].bytes,
+        utf16le_with_nul(TEXTO_RENDERIZADO),
+        "os bytes capturados têm de ser os que o dono renderizou"
+    );
+    assert!(
+        formats.iter().any(|f| f.format_id == segundo),
+        "o segundo formato adiado também tem de ser capturado — a enumeração \
+         não pode ter sido truncada pelo render do primeiro"
+    );
+    assert!(
+        pedidos >= 2,
+        "os dois formatos precisam ter sido pedidos; obtido {pedidos}"
+    );
 }
 
 #[test]

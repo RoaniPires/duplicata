@@ -1,10 +1,10 @@
 use duplicata_core::canonical::{
-    decide, CF_DIB, CF_DIBV5, CF_HDROP, CF_LOCALE, CF_OEMTEXT, CF_REGISTERED_FIRST, CF_TEXT,
-    CF_UNICODETEXT,
+    gate_size, screen, CF_DIB, CF_DIBV5, CF_HDROP, CF_LOCALE, CF_OEMTEXT, CF_REGISTERED_FIRST,
+    CF_TEXT, CF_UNICODETEXT,
 };
 use duplicata_core::{
-    log_event, CaptureError, CaptureOutcome, CapturedFormat, ClipboardSource, Config, Decision,
-    FormatInfo, LogFields,
+    copied_or_empty, log_event, CaptureError, CaptureOutcome, CapturedFormat, ClipboardSource,
+    Config, Decision, FormatAnnounce, LogFields, RejectReason,
 };
 use tracing::Level;
 use windows::Win32::Foundation::{CloseHandle, HGLOBAL};
@@ -33,7 +33,7 @@ impl ClipboardSource for WinClipboard {
         // SAFETY: `OpenClipboard(None)` sem janela-dona; se falhar (outro
         // processo a mantém aberta) retornamos `Busy` sem chamar `CloseClipboard`.
         // Em sucesso, `CloseClipboard` é sempre chamado antes de retornar,
-        // fechando a MESMA sessão em que as duas fases rodam.
+        // fechando a MESMA sessão em que as três fases rodam.
         unsafe {
             if OpenClipboard(None).is_err() {
                 return Err(CaptureError::Busy);
@@ -45,41 +45,65 @@ impl ClipboardSource for WinClipboard {
     }
 }
 
-struct Handle {
-    info: FormatInfo,
-    hglobal: HGLOBAL,
-}
-
 /// # Safety
 /// Só pode ser chamada com a área de transferência aberta (`OpenClipboard` OK).
+///
+/// As três fases são, nesta ordem e sem exceção:
+///
+/// 1. **Anúncio** — `EnumClipboardFormats` + `GetClipboardFormatNameW`. Nenhuma
+///    dessas obtém handle, e portanto nenhuma faz o Windows mandar
+///    `WM_RENDERFORMAT` ao dono.
+/// 2. **Filtros** — `screen` decide só com id, nome e programa de origem.
+/// 3. **Handles e bytes** — só aqui `GetClipboardData` aparece.
+///
+/// A ordem não é estética. Duas coisas dependem dela:
+///
+/// - **Medido.** Um dono com renderização adiada (`SetClipboardData(fmt,
+///   NULL)`) só produz os bytes quando alguém chama `GetClipboardData`. Chamar
+///   isso na fase de anúncio obrigava toda origem a materializar o conteúdo
+///   antes de os filtros de privacidade opinarem — inclusive uma origem que
+///   sinalizou `ExcludeClipboardContentFromMonitorProcessing` ou um programa da
+///   lista de bloqueio. O teste
+///   `a_rejected_capture_never_asks_a_delayed_render_owner_to_produce_the_bytes`
+///   prende isso: com o desenho antigo saíam 3 pedidos de renderização numa
+///   captura recusada; agora saem 0.
+/// - **Contrato, não sintoma observado.** O Win32 não permite modificar o
+///   clipboard durante a enumeração, e `GetClipboardData` dentro do laço de
+///   `EnumClipboardFormats` fazia exatamente isso, via o `SetClipboardData` com
+///   que o dono responde ao `WM_RENDERFORMAT`. Numa medição direta (ver
+///   `a_delayed_render_owner_with_two_formats_is_captured_whole`) o desenho
+///   antigo NÃO truncou a enumeração — então isto é conformidade com a regra,
+///   não a explicação de um defeito reproduzido.
 unsafe fn capture_within_open_session(cfg: &Config) -> Result<CaptureOutcome, CaptureError> {
-    // SAFETY: fase 1 — enumera + GlobalSize, sem GlobalLock nem cópia; requer a
-    // área de transferência aberta, garantido pelo chamador (`try_capture`).
-    let handles = unsafe { enumerate_handles() };
-    if handles.is_empty() {
+    // SAFETY: fase 1 — só enumeração e nome; requer a área de transferência
+    // aberta, garantido pelo chamador (`try_capture`).
+    let announces = unsafe { announce_formats() };
+    if announces.is_empty() {
         return Ok(CaptureOutcome::Empty);
     }
 
-    let infos: Vec<FormatInfo> = handles.iter().map(|h| h.info.clone()).collect();
     // SAFETY: mesma sessão de OpenClipboard já aberta pelo chamador
     // (try_capture) — GetClipboardOwner só consulta, não precisa de mais nada.
     let source_program = unsafe { resolve_source_program() };
-    match decide(&infos, source_program.as_deref(), cfg) {
-        Decision::Reject(reason) => Ok(CaptureOutcome::Rejected(reason)),
-        Decision::Copy { canonical_index } => {
-            // SAFETY: fase 2 — só agora GlobalLock + cópia, só do que foi
-            // aceito; a área de transferência ainda está aberta (mesma sessão).
-            let formats = unsafe { copy_all(&handles) };
-            Ok(CaptureOutcome::Copied {
-                formats,
-                canonical_index,
-            })
-        }
+
+    // Fase 2 — filtros de exclusão + escolha do canônico, sem um único handle.
+    let canonical_format_id = match screen(&announces, source_program.as_deref(), cfg) {
+        Decision::Reject(reason) => return Ok(CaptureOutcome::Rejected(reason)),
+        Decision::Copy { canonical_index } => announces[canonical_index].format_id,
+    };
+
+    // SAFETY: fase 3 — só agora os handles, com a enumeração já encerrada e os
+    // filtros já aplicados; a área de transferência continua aberta (mesma
+    // sessão).
+    match unsafe { acquire_and_copy(&announces, canonical_format_id, cfg) } {
+        Err(reason) => Ok(CaptureOutcome::Rejected(reason)),
+        Ok(formats) => Ok(copied_or_empty(formats, canonical_format_id)),
     }
 }
 
 /// # Safety
-/// Requer a área de transferência aberta (mesma sessão de `enumerate_handles`).
+/// Requer a área de transferência aberta (contrato de
+/// [`capture_within_open_session`]).
 unsafe fn resolve_source_program() -> Option<String> {
     // SAFETY: clipboard aberto (contrato desta função) — GetClipboardOwner só
     // consulta o HWND dono.
@@ -122,37 +146,27 @@ unsafe fn resolve_source_program() -> Option<String> {
 
 /// # Safety
 /// Requer a área de transferência aberta.
-unsafe fn enumerate_handles() -> Vec<Handle> {
+///
+/// **Nenhuma chamada daqui pode obter handle nem modificar o clipboard.**
+/// `EnumClipboardFormats` e `GetClipboardFormatNameW` cumprem isso; o que
+/// materializa bytes (`GetClipboardData`) pertence a [`acquire_handles`],
+/// depois dos filtros.
+unsafe fn announce_formats() -> Vec<FormatAnnounce> {
     let mut out = Vec::new();
     // SAFETY: clipboard aberto; `EnumClipboardFormats(0)` inicia a enumeração.
     let mut fmt = unsafe { EnumClipboardFormats(0) };
     while fmt != 0 {
-        if !is_known_hglobal_format(fmt) {
+        if is_known_hglobal_format(fmt) {
+            out.push(FormatAnnounce {
+                format_id: fmt,
+                // SAFETY: nome só é consultado para formatos registrados.
+                format_name: unsafe { registered_name(fmt) },
+            });
+        } else {
             log_event!(
                 Level::DEBUG,
                 LogFields::new("clipboard_format_ignored_non_hglobal").format_ids([fmt])
             );
-            // SAFETY: continua a enumeração a partir do formato anterior.
-            fmt = unsafe { EnumClipboardFormats(fmt) };
-            continue;
-        }
-        // SAFETY: `GetClipboardData` com a área aberta; `fmt` já passou pela
-        // lista positiva acima, então o handle devolvido É um HGLOBAL — NULL
-        // aqui só significa delayed-render que falhou, e omite o formato.
-        if let Ok(handle) = unsafe { GetClipboardData(fmt) } {
-            let hglobal = HGLOBAL(handle.0);
-            // SAFETY: `GlobalSize` num HGLOBAL só consulta o tamanho, não trava
-            // nem copia.
-            let byte_len = unsafe { GlobalSize(hglobal) } as u64;
-            out.push(Handle {
-                info: FormatInfo {
-                    format_id: fmt,
-                    // SAFETY: nome só é consultado para formatos registrados.
-                    format_name: unsafe { registered_name(fmt) },
-                    byte_len,
-                },
-                hglobal,
-            });
         }
         // SAFETY: continua a enumeração a partir do formato anterior.
         fmt = unsafe { EnumClipboardFormats(fmt) };
@@ -160,31 +174,80 @@ unsafe fn enumerate_handles() -> Vec<Handle> {
     out
 }
 
+/// Obtém, mede e copia cada formato — um de cada vez.
+///
 /// # Safety
 /// Requer a área de transferência ainda aberta (mesma sessão de
-/// `enumerate_handles`) e os handles ainda válidos.
-unsafe fn copy_all(handles: &[Handle]) -> Vec<CapturedFormat> {
-    handles
-        .iter()
-        // SAFETY: `h.hglobal` veio de `GetClipboardData` nesta mesma sessão,
-        // ainda aberta.
-        .filter_map(|h| unsafe { copy_bytes(h.hglobal) }.map(|bytes| (h, bytes)))
-        .map(|(h, bytes)| CapturedFormat {
-            format_id: h.info.format_id,
-            format_name: h.info.format_name.clone(),
+/// [`announce_formats`]) e a enumeração já encerrada — um `SetClipboardData`
+/// disparado por `WM_RENDERFORMAT` daqui não pode cair no meio dela.
+///
+/// **Nenhum handle atravessa outra chamada a `GetClipboardData`**, e é por isso
+/// que obter e copiar são o mesmo passo. O handle devolvido pertence ao
+/// clipboard, não a nós, e deixa de valer quando o dado daquele formato é
+/// reposto — e `GetClipboardData` é justamente o que intima o dono a repor, via
+/// `WM_RENDERFORMAT`. Colher todos os handles antes de copiar abriria essa
+/// janela justamente sobre a classe de dono que esta função passou a atender.
+///
+/// O `Vec` sai na ordem de enunciação, que é a prioridade de formato que
+/// `clipboard_restore` republica e que quem cola enxerga.
+unsafe fn acquire_and_copy(
+    announces: &[FormatAnnounce],
+    canonical_format_id: u32,
+    cfg: &Config,
+) -> Result<Vec<CapturedFormat>, RejectReason> {
+    let mut out = Vec::with_capacity(announces.len());
+    let mut undelivered = Vec::new();
+    for announce in announces {
+        // SAFETY: `GetClipboardData` com a área aberta; `format_id` já passou
+        // pela lista positiva em `announce_formats`, então o handle devolvido É
+        // um HGLOBAL. Falha aqui é formato que o dono não entregou (renderização
+        // adiada que não veio) — omitimos o formato.
+        let Ok(handle) = (unsafe { GetClipboardData(announce.format_id) }) else {
+            undelivered.push(announce.format_id);
+            continue;
+        };
+        let hglobal = HGLOBAL(handle.0);
+        // SAFETY: `GlobalSize` num HGLOBAL só consulta o tamanho, não trava
+        // nem copia.
+        let byte_len = unsafe { GlobalSize(hglobal) };
+
+        // O limite roda com o handle na mão mas antes do `GlobalLock` do
+        // canônico: um item grande demais é recusado sem que os bytes dele
+        // sejam copiados para memória própria.
+        if announce.format_id == canonical_format_id {
+            if let Some(reason) = gate_size(canonical_format_id, byte_len as u64, cfg) {
+                return Err(reason);
+            }
+        }
+
+        // SAFETY: `hglobal` acabou de vir de `GetClipboardData` e nada entre
+        // aquela chamada e esta pôde invalidá-lo.
+        let Some(bytes) = (unsafe { copy_bytes(hglobal, byte_len) }) else {
+            undelivered.push(announce.format_id);
+            continue;
+        };
+        out.push(CapturedFormat {
+            format_id: announce.format_id,
+            format_name: announce.format_name.clone(),
             bytes,
-        })
-        .collect()
+        });
+    }
+    if !undelivered.is_empty() {
+        log_event!(
+            Level::WARN,
+            LogFields::new("clipboard_format_not_delivered").format_ids(undelivered)
+        );
+    }
+    Ok(out)
 }
 
 /// # Safety
-/// `hglobal` deve vir de `GetClipboardData` na sessão de clipboard ainda
-/// aberta, para um `format_id` que passou por [`is_known_hglobal_format`]
-/// (só esses chegam a [`Handle`]/`enumerate_handles`) — `hglobal` aqui É
-/// garantidamente um `HGLOBAL` de verdade, nunca um `HBITMAP`/`HPALETTE`/etc.
-unsafe fn copy_bytes(hglobal: HGLOBAL) -> Option<Vec<u8>> {
-    // SAFETY: `GlobalSize` num HGLOBAL de verdade (ver contrato da função).
-    let size = unsafe { GlobalSize(hglobal) };
+/// `hglobal` deve vir da chamada a `GetClipboardData` imediatamente anterior,
+/// na sessão de clipboard ainda aberta, para um `format_id` que passou por
+/// [`is_known_hglobal_format`] (só esses chegam a [`FormatAnnounce`]) —
+/// `hglobal` aqui É garantidamente um `HGLOBAL` de verdade, nunca um
+/// `HBITMAP`/`HPALETTE`/etc. `size` deve ser o `GlobalSize` desse mesmo handle.
+unsafe fn copy_bytes(hglobal: HGLOBAL, size: usize) -> Option<Vec<u8>> {
     if size == 0 {
         return Some(Vec::new());
     }

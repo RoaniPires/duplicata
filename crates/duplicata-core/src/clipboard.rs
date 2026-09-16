@@ -1,9 +1,13 @@
 use std::sync::Mutex;
 
-use crate::canonical::{decide, RejectReason};
-use crate::capture::{CapturedFormat, FormatInfo};
+use tracing::Level;
+
+use crate::canonical::{gate_size, screen, Decision, RejectReason};
+use crate::capture::{CapturedFormat, FormatAnnounce};
 use crate::config::Config;
 use crate::error::CaptureError;
+use crate::log_event;
+use crate::log_fields::LogFields;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureOutcome {
@@ -13,6 +17,25 @@ pub enum CaptureOutcome {
     },
     Empty,
     Rejected(RejectReason),
+}
+
+pub fn copied_or_empty(formats: Vec<CapturedFormat>, canonical_format_id: u32) -> CaptureOutcome {
+    match formats
+        .iter()
+        .position(|f| f.format_id == canonical_format_id)
+    {
+        Some(canonical_index) => CaptureOutcome::Copied {
+            formats,
+            canonical_index,
+        },
+        None => {
+            log_event!(
+                Level::WARN,
+                LogFields::new("canonical_format_unavailable").format_ids([canonical_format_id])
+            );
+            CaptureOutcome::Empty
+        }
+    }
 }
 
 pub trait ClipboardSource: Send {
@@ -93,34 +116,46 @@ impl ClipboardSource for FakeClipboardSource {
         match &s.outcome {
             FakeOutcome::Fatal(e) => Err(e.clone()),
             FakeOutcome::Formats(formats) => {
-                if formats.is_empty() {
-                    s.copied_format_ids.clear();
-                    return Ok(CaptureOutcome::Empty);
-                }
-                let infos: Vec<FormatInfo> = formats
-                    .iter()
-                    .map(|f| FormatInfo {
-                        format_id: f.format_id,
-                        format_name: f.format_name.clone(),
-                        byte_len: f.bytes.len() as u64,
-                    })
-                    .collect();
                 let source_program = s.source_program.clone();
-                match decide(&infos, source_program.as_deref(), cfg) {
-                    crate::canonical::Decision::Copy { canonical_index } => {
-                        let formats = formats.clone();
-                        s.copied_format_ids = formats.iter().map(|f| f.format_id).collect();
-                        Ok(CaptureOutcome::Copied {
-                            formats,
-                            canonical_index,
-                        })
+                let outcome = fake_capture(formats, source_program.as_deref(), cfg);
+                s.copied_format_ids = match &outcome {
+                    CaptureOutcome::Copied { formats, .. } => {
+                        formats.iter().map(|f| f.format_id).collect()
                     }
-                    crate::canonical::Decision::Reject(reason) => {
-                        s.copied_format_ids.clear();
-                        Ok(CaptureOutcome::Rejected(reason))
-                    }
-                }
+                    _ => Vec::new(),
+                };
+                Ok(outcome)
             }
         }
     }
+}
+
+fn fake_capture(
+    formats: &[CapturedFormat],
+    source_program: Option<&str>,
+    cfg: &Config,
+) -> CaptureOutcome {
+    if formats.is_empty() {
+        return CaptureOutcome::Empty;
+    }
+
+    let announces: Vec<FormatAnnounce> = formats
+        .iter()
+        .map(|f| FormatAnnounce {
+            format_id: f.format_id,
+            format_name: f.format_name.clone(),
+        })
+        .collect();
+
+    let canonical_index = match screen(&announces, source_program, cfg) {
+        Decision::Reject(reason) => return CaptureOutcome::Rejected(reason),
+        Decision::Copy { canonical_index } => canonical_index,
+    };
+
+    let canonical = &formats[canonical_index];
+    if let Some(reason) = gate_size(canonical.format_id, canonical.bytes.len() as u64, cfg) {
+        return CaptureOutcome::Rejected(reason);
+    }
+
+    copied_or_empty(formats.to_vec(), canonical.format_id)
 }

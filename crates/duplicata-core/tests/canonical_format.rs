@@ -1,16 +1,12 @@
 use duplicata_core::canonical::{
-    select_canonical, CF_BITMAP, CF_DIB, CF_DIBV5, CF_HDROP, CF_LOCALE, CF_OEMTEXT, CF_TEXT,
-    CF_UNICODETEXT,
+    screen, select_canonical, Decision, CF_BITMAP, CF_DIB, CF_DIBV5, CF_HDROP, CF_LOCALE,
+    CF_OEMTEXT, CF_TEXT, CF_UNICODETEXT,
 };
-use duplicata_core::capture::FormatInfo;
-use duplicata_core::{select_canonical_from_info, CanonicalKind};
+use duplicata_core::capture::FormatAnnounce;
+use duplicata_core::{CanonicalKind, Config};
 
-fn info_named(id: u32, name: &str, byte_len: u64) -> FormatInfo {
-    FormatInfo {
-        format_id: id,
-        format_name: Some(name.into()),
-        byte_len,
-    }
+fn cfg() -> Config {
+    Config::with_paths("db".into(), "logs".into())
 }
 
 fn f(id: u32, n: usize) -> duplicata_core::CapturedFormat {
@@ -26,6 +22,23 @@ fn named(id: u32, name: &str, n: usize) -> duplicata_core::CapturedFormat {
         format_id: id,
         format_name: Some(name.into()),
         bytes: vec![0u8; n],
+    }
+}
+
+fn announced(formats: &[duplicata_core::CapturedFormat]) -> Vec<FormatAnnounce> {
+    formats
+        .iter()
+        .map(|f| FormatAnnounce {
+            format_id: f.format_id,
+            format_name: f.format_name.clone(),
+        })
+        .collect()
+}
+
+fn screened_index(formats: &[duplicata_core::CapturedFormat]) -> Option<usize> {
+    match screen(&announced(formats), None, &cfg()) {
+        Decision::Copy { canonical_index } => Some(canonical_index),
+        Decision::Reject(_) => None,
     }
 }
 
@@ -79,7 +92,7 @@ fn hdrop_is_next_after_text_and_image() {
 }
 
 #[test]
-fn largest_registered_format_wins_when_no_standard_canonical() {
+fn first_registered_format_wins_when_no_standard_canonical() {
     let formats = vec![
         f(CF_LOCALE, 4),
         f(CF_OEMTEXT, 20),
@@ -89,30 +102,54 @@ fn largest_registered_format_wins_when_no_standard_canonical() {
     ];
     let c = select_canonical(&formats).unwrap();
     assert_eq!(c.kind, CanonicalKind::Custom);
-    assert_eq!(c.format_id, 0xC020);
-    assert_eq!(c.byte_len, 250);
+    assert_eq!(
+        c.format_id, 0xC010,
+        "vence o primeiro registrado enunciado, não o maior (o critério antigo \
+         teria escolhido 0xC020, de 250 bytes)"
+    );
 }
 
 #[test]
-fn custom_size_tie_breaks_by_smallest_format_id() {
-    let formats = vec![
-        named(0xC0FF, "big id", 500),
-        named(0xC001, "small id", 500),
-        named(0xC080, "mid id", 500),
-    ];
-    assert_eq!(select_canonical(&formats).unwrap().format_id, 0xC001);
+fn registered_format_choice_never_depends_on_size() {
+    let crescente = vec![named(0xC010, "A", 1), named(0xC020, "B", 9999)];
+    let decrescente = vec![named(0xC010, "A", 9999), named(0xC020, "B", 1)];
+
+    assert_eq!(
+        select_canonical(&crescente).unwrap().format_id,
+        select_canonical(&decrescente).unwrap().format_id
+    );
+    assert_eq!(select_canonical(&crescente).unwrap().format_id, 0xC010);
 }
 
 #[test]
-fn custom_size_tie_break_from_info_matches_the_post_copy_result() {
-    let infos = vec![
-        info_named(0xC0FF, "big id", 500),
-        info_named(0xC001, "small id", 500),
-        info_named(0xC080, "mid id", 500),
+fn screen_and_select_canonical_always_agree_on_the_same_format() {
+    let casos = vec![
+        vec![
+            f(CF_TEXT, 10),
+            named(0xC000, "HTML Format", 5000),
+            f(CF_DIB, 9999),
+            f(CF_UNICODETEXT, 6),
+        ],
+        vec![f(CF_DIBV5, 100), f(CF_DIB, 100)],
+        vec![f(CF_DIB, 100), f(CF_DIBV5, 100)],
+        vec![named(0xC001, "Shell IDList Array", 999), f(CF_HDROP, 40)],
+        vec![
+            f(CF_LOCALE, 4),
+            named(0xC010, "App Data A", 100),
+            named(0xC020, "App Data B", 250),
+        ],
     ];
-    let (index, selection) = select_canonical_from_info(&infos).unwrap();
-    assert_eq!(index, 1);
-    assert_eq!(selection.format_id, 0xC001);
+
+    for formats in casos {
+        let esperado = select_canonical(&formats).unwrap();
+        let index = screened_index(&formats).expect("screen deveria aprovar");
+        assert_eq!(
+            formats[index].format_id,
+            esperado.format_id,
+            "screen e select_canonical divergiram em {:?}",
+            formats.iter().map(|f| f.format_id).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
@@ -124,6 +161,7 @@ fn none_when_only_auxiliary_formats() {
         f(CF_BITMAP, 8),
     ];
     assert!(select_canonical(&formats).is_none());
+    assert!(screened_index(&formats).is_none());
 }
 
 #[test]

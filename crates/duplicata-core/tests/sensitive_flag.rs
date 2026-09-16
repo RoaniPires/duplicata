@@ -2,8 +2,8 @@ mod support;
 
 use std::path::PathBuf;
 
-use duplicata_core::canonical::{decide, Decision, RejectReason, CF_UNICODETEXT};
-use duplicata_core::capture::FormatInfo;
+use duplicata_core::canonical::{screen, Decision, RejectReason, CF_UNICODETEXT};
+use duplicata_core::capture::FormatAnnounce;
 use duplicata_core::{
     capture_and_enqueue, unicode_text_format, ByteBudgetQueue, CaptureQueue, CapturedFormat,
     Config, FakeClipboardSource, FakeClock, FakeHistoryRepository, HistoryRepository,
@@ -22,52 +22,52 @@ fn policy() -> duplicata_core::backoff::BackoffPolicy {
 }
 
 #[test]
-fn decide_rejects_with_sensitive_flagged_when_the_sentinel_format_is_present() {
+fn screen_rejects_with_sensitive_flagged_when_the_sentinel_format_is_present() {
     let formats = vec![
-        FormatInfo {
+        FormatAnnounce {
             format_id: 13,
             format_name: None,
-            byte_len: 6,
         },
-        FormatInfo {
+        FormatAnnounce {
             format_id: 0xC001,
             format_name: Some(SENSITIVE_FORMAT_NAME.to_string()),
-            byte_len: 0,
         },
     ];
     assert_eq!(
-        decide(&formats, None, &cfg()),
+        screen(&formats, None, &cfg()),
         Decision::Reject(RejectReason::SensitiveFlagged)
     );
 }
 
 #[test]
-fn decide_checks_the_sensitive_flag_before_size_or_canonical_selection() {
-    let huge_text = FormatInfo {
-        format_id: CF_UNICODETEXT,
-        format_name: None,
-        byte_len: 10 * 1024 * 1024,
-    };
-    let sentinel = FormatInfo {
+fn screen_decides_the_sensitive_flag_from_the_announcement_alone() {
+    // O sinalizador é reconhecido pelo NOME do formato, que
+    // `GetClipboardFormatNameW` devolve sem obter handle nenhum. É por isso que
+    // a recusa pode acontecer antes de qualquer `GetClipboardData` — ou seja,
+    // sem obrigar um dono com renderização adiada a produzir justamente o
+    // conteúdo que ele pediu para ninguém monitorar.
+    let sentinel = FormatAnnounce {
         format_id: 0xC001,
         format_name: Some(SENSITIVE_FORMAT_NAME.to_string()),
-        byte_len: 0,
+    };
+    let text = FormatAnnounce {
+        format_id: CF_UNICODETEXT,
+        format_name: None,
     };
     assert_eq!(
-        decide(&[huge_text, sentinel], None, &cfg()),
+        screen(&[text, sentinel], None, &cfg()),
         Decision::Reject(RejectReason::SensitiveFlagged)
     );
 }
 
 #[test]
-fn decide_without_the_sentinel_format_proceeds_normally() {
-    let formats = vec![FormatInfo {
+fn screen_without_the_sentinel_format_proceeds_normally() {
+    let formats = vec![FormatAnnounce {
         format_id: CF_UNICODETEXT,
         format_name: None,
-        byte_len: 6,
     }];
     assert_eq!(
-        decide(&formats, None, &cfg()),
+        screen(&formats, None, &cfg()),
         Decision::Copy { canonical_index: 0 }
     );
 }

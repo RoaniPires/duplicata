@@ -29,10 +29,9 @@ impl CapturedFormat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FormatInfo {
+pub struct FormatAnnounce {
     pub format_id: u32,
     pub format_name: Option<String>,
-    pub byte_len: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

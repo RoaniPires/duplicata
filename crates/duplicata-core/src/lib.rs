@@ -36,11 +36,11 @@ pub mod work_item;
 pub mod worker;
 
 pub use backoff::{capture_with_retry, BackoffPolicy, RetryOutcome};
-pub use canonical::{decide, select_canonical, select_canonical_from_info, Decision, RejectReason};
+pub use canonical::{gate_size, screen, select_canonical, Decision, RejectReason};
 pub use capture::{
-    CanonicalKind, CanonicalSelection, CapturedFormat, FormatInfo, RawCapture, Timestamp,
+    CanonicalKind, CanonicalSelection, CapturedFormat, FormatAnnounce, RawCapture, Timestamp,
 };
-pub use clipboard::{CaptureOutcome, ClipboardSource, FakeClipboardSource};
+pub use clipboard::{copied_or_empty, CaptureOutcome, ClipboardSource, FakeClipboardSource};
 pub use clock::{Clock, FakeClock};
 pub use config::{Config, ConfigFallback};
 pub use error::{CaptureError, InitError, StoreError, WorkerError};
