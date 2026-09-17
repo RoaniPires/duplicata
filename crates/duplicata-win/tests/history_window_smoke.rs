@@ -679,6 +679,185 @@ fn ctrl_p_pins_through_the_same_path_as_the_context_menu() {
 }
 
 #[test]
+#[ignore = "precisa de sessão gráfica; mexe na tabela de teclado da thread"]
+fn mouse_wheel_scrolls_the_list_without_moving_the_selection() {
+    use duplicata_core::hint_strip::HINT_STRIP_PX;
+    use duplicata_core::row_layout::{rows_that_fit, ROW_HEIGHT_PX};
+    use duplicata_core::{run_worker, Config, WorkerCounters};
+    use windows::Win32::Foundation::{LPARAM, RECT, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_P;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, SendMessageW, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEWHEEL,
+    };
+
+    const TOTAL: i64 = 30;
+    const LIST_TOP_PX: i32 = 34 + 30; // FILTER_STRIP_PX + SEARCH_BAR_PX (privados em history_window.rs)
+
+    let pins = Arc::new(Mutex::new(Vec::new()));
+    let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+
+    let worker_queue = Arc::clone(&queue);
+    let worker_pins = Arc::clone(&pins);
+    let worker = thread::spawn(move || {
+        let mut inner = FakeHistoryRepository::new();
+        for tag in 1..=TOTAL as u8 {
+            inner
+                .upsert(&seed_record(tag))
+                .expect("semear o repositório do worker");
+        }
+        let mut repo = RecordingRepo {
+            inner,
+            pins: worker_pins,
+        };
+        let counters = WorkerCounters::default();
+        let (heuristic_tx, _heuristic_rx) = std::sync::mpsc::channel();
+        run_worker(
+            worker_queue.as_ref(),
+            &mut repo,
+            &Config::with_paths("db".into(), "logs".into()),
+            &counters,
+            &heuristic_tx,
+        );
+    });
+
+    // rows[0] = clip_id TOTAL (o mais recente), decrescendo — mesma convenção
+    // de "o item mais recente" no teste de Ctrl+P acima.
+    let rows: Vec<ClipListItem> = (1..=TOTAL)
+        .rev()
+        .map(|id| text_row(id, &format!("item {id}")))
+        .collect();
+    let reader = CountingReader {
+        calls: Arc::new(AtomicUsize::new(0)),
+        last_limit: Arc::new(AtomicUsize::new(0)),
+        rows,
+    };
+    let window = HistoryWindow::new(
+        reader,
+        || -> Result<Box<dyn HistoryReader>, StoreError> {
+            Ok(Box::new(FakeHistoryRepository::new()))
+        },
+        || true,
+        Arc::clone(&queue),
+        PathBuf::from("test.db"),
+        Rc::new(SelfWriteFilter::new()),
+    )
+    .expect("criar a janela");
+    let hwnd = window.hwnd();
+
+    // SAFETY: `hwnd` recém-criada nesta thread.
+    unsafe {
+        SendMessageW(hwnd, WM_HOTKEY, Some(WPARAM(1)), Some(LPARAM(0)));
+    }
+
+    // A seleção nasce no índice 0 = clip_id TOTAL (o mais recente). Fixa para
+    // ter um jeito observável de perguntar "quem está selecionado agora".
+    {
+        let _ctrl = HeldCtrl::press();
+        // SAFETY: idem.
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_P.0 as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
+    assert_eq!(
+        pins.lock().unwrap().clone(),
+        vec![(TOTAL, true, SetPinnedOutcome::Applied)],
+        "antes de rolar, Ctrl+P tem de fixar o item selecionado por padrão \
+         (o mais recente)"
+    );
+
+    let mut client = RECT::default();
+    // SAFETY: `hwnd` válido.
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    let chrome = LIST_TOP_PX + HINT_STRIP_PX;
+    let fits = rows_that_fit(client.bottom - client.top, chrome, ROW_HEIGHT_PX) as i64;
+    assert!(
+        fits + 6 < TOTAL,
+        "o teste precisa de mais itens do que cabem na tela para rolar de fato \
+         (cabem {fits}, tem {TOTAL})"
+    );
+
+    // Duas "notches" para trás (para o usuário), sinal negativo — WHEEL_DELTA
+    // (120) por notch, WHEEL_LINES_PER_NOTCH (3) linhas por notch em
+    // history_window.rs: 2 * 3 = 6 linhas para baixo.
+    let wheel_wparam = WPARAM((((-240i16) as u16 as u32) << 16) as usize);
+    // SAFETY: idem.
+    unsafe {
+        SendMessageW(hwnd, WM_MOUSEWHEEL, Some(wheel_wparam), Some(LPARAM(0)));
+    }
+
+    // A rolagem sozinha não pode mexer em `ctx.selected`: Ctrl+P ainda tem de
+    // mirar no clip TOTAL, agora desfixando (a segunda fixação alterna).
+    {
+        let _ctrl = HeldCtrl::press();
+        // SAFETY: idem.
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_P.0 as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
+    assert_eq!(
+        pins.lock().unwrap().clone(),
+        vec![
+            (TOTAL, true, SetPinnedOutcome::Applied),
+            (TOTAL, false, SetPinnedOutcome::Applied)
+        ],
+        "WM_MOUSEWHEEL rolou a lista, mas não pode ter tocado em `ctx.selected` \
+         — Ctrl+P continua mirando o clip {TOTAL}"
+    );
+
+    // O Ctrl+P acima chama `select_clip`, que recentraliza a rolagem no item
+    // ainda selecionado (índice 0) — de propósito, é o que mantém o item
+    // recém-fixado visível. Isso zera `scroll_offset` outra vez, então rola
+    // mais uma vez antes de testar o clique.
+    // SAFETY: idem.
+    unsafe {
+        SendMessageW(hwnd, WM_MOUSEWHEEL, Some(wheel_wparam), Some(LPARAM(0)));
+    }
+
+    // Clicar no topo da área de lista agora tem de acertar o item que ficou
+    // visível ali depois da rolagem (offset 6 → clip TOTAL - 6), provando que
+    // `ctx.scroll_offset` avançou o número certo de linhas.
+    let click_lparam = LPARAM(((LIST_TOP_PX as u32) << 16) as isize);
+    // SAFETY: idem.
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(0)), Some(click_lparam));
+    }
+    {
+        let _ctrl = HeldCtrl::press();
+        // SAFETY: idem.
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_P.0 as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
+    assert_eq!(
+        pins.lock().unwrap().last().copied(),
+        Some((TOTAL - 6, true, SetPinnedOutcome::Applied)),
+        "depois de rolar 2 notches (6 linhas) e clicar no topo da lista, o item \
+         fixado tem de ser o clip {}, confirmando o deslocamento de scroll_offset",
+        TOTAL - 6
+    );
+
+    queue.close();
+    worker.join().expect("a worker termina no close da fila");
+}
+
+#[test]
 #[ignore = "precisa de sessão gráfica (mede a fonte de interface real)"]
 fn the_hint_strip_fits_without_wasting_width() {
     use duplicata_core::filter_strip::SEGMENT_PADDING_PX;

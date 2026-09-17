@@ -25,6 +25,21 @@ pub fn next_selection_index(current: usize, total: usize, key: NavKey, page_size
     raw.min(last)
 }
 
+pub fn scroll_offset_after_wheel(
+    current_offset: usize,
+    lines: isize,
+    total: usize,
+    page_size: usize,
+) -> usize {
+    let max_offset = total.saturating_sub(page_size.max(1));
+    let shifted = if lines >= 0 {
+        current_offset.saturating_add(lines as usize)
+    } else {
+        current_offset.saturating_sub(lines.unsigned_abs())
+    };
+    shifted.min(max_offset)
+}
+
 pub fn row_index_at(
     y: i32,
     row_height_px: i32,

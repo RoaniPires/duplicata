@@ -1,4 +1,6 @@
-use duplicata_win::navigation::{next_selection_index, row_index_at, NavKey};
+use duplicata_win::navigation::{
+    next_selection_index, row_index_at, scroll_offset_after_wheel, NavKey,
+};
 
 #[test]
 fn up_and_down_move_by_one() {
@@ -62,6 +64,38 @@ fn page_size_larger_than_total_clamps_like_home_and_end() {
 fn page_size_zero_still_moves_by_at_least_one() {
     assert_eq!(next_selection_index(5, 10, NavKey::PageDown, 0), 6);
     assert_eq!(next_selection_index(5, 10, NavKey::PageUp, 0), 4);
+}
+
+#[test]
+fn wheel_scrolls_up_and_down_by_the_given_number_of_lines() {
+    assert_eq!(scroll_offset_after_wheel(5, 3, 20, 4), 8);
+    assert_eq!(scroll_offset_after_wheel(5, -3, 20, 4), 2);
+}
+
+#[test]
+fn wheel_up_past_the_top_clamps_to_zero_no_wrap() {
+    assert_eq!(scroll_offset_after_wheel(2, -5, 20, 4), 0);
+}
+
+#[test]
+fn wheel_down_past_the_last_page_clamps_so_the_view_stays_full() {
+    assert_eq!(scroll_offset_after_wheel(15, 10, 20, 4), 16);
+}
+
+#[test]
+fn wheel_with_total_not_exceeding_a_page_never_scrolls() {
+    assert_eq!(scroll_offset_after_wheel(0, 5, 3, 10), 0);
+}
+
+#[test]
+fn wheel_with_zero_lines_does_not_move_the_offset() {
+    assert_eq!(scroll_offset_after_wheel(4, 0, 20, 4), 4);
+}
+
+#[test]
+fn wheel_with_extreme_line_counts_never_panics_and_clamps() {
+    assert_eq!(scroll_offset_after_wheel(4, isize::MIN, 20, 4), 0);
+    assert_eq!(scroll_offset_after_wheel(4, isize::MAX, 20, 4), 16);
 }
 
 #[test]

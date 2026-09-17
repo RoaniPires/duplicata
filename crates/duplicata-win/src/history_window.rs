@@ -45,11 +45,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
     CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GUITHREADINFO, GWLP_USERDATA, IDC_ARROW, IDNO, IDYES,
     MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING,
-    SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE,
-    WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_PASTE, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_POPUP,
-    WS_SYSMENU, WS_THICKFRAME,
+    SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WHEEL_DELTA,
+    WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_PAINT, WM_PASTE, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CAPTION,
+    WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::app_icon;
@@ -57,7 +57,7 @@ use crate::clipboard_restore;
 use crate::dpi;
 use crate::error_banner;
 use crate::hotkey_win::HOTKEY_ID;
-use crate::navigation::{next_selection_index, row_index_at, NavKey};
+use crate::navigation::{next_selection_index, row_index_at, scroll_offset_after_wheel, NavKey};
 use crate::paste_injector;
 use crate::system_appearance::SystemAppearance;
 use crate::text_metrics;
@@ -85,6 +85,9 @@ struct ToggleUi {
     count: u64,
 }
 const MAX_ROWS: usize = 500;
+// Padrão do Windows para lista sem scrollbar própria (SPI_GETWHEELSCROLLLINES
+// também é 3 por padrão).
+const WHEEL_LINES_PER_NOTCH: isize = 3;
 
 struct HistoryWindowCtx {
     reader: RefCell<Option<Box<dyn HistoryReader>>>,
@@ -97,6 +100,7 @@ struct HistoryWindowCtx {
     rows: RefCell<Vec<ClipListItem>>,
     selected: Cell<usize>,
     scroll_offset: Cell<usize>,
+    wheel_remainder: Cell<i32>,
     glass: Cell<bool>,
     segment_rects: Cell<[CoreRect; 4]>,
     prev_hwnd: Cell<HWND>,
@@ -142,6 +146,7 @@ impl HistoryWindow {
             rows: RefCell::new(Vec::new()),
             selected: Cell::new(0),
             scroll_offset: Cell::new(0),
+            wheel_remainder: Cell::new(0),
             glass: Cell::new(false),
             segment_rects: Cell::new(segment_rects_packed(
                 &[30, 34, 42, 54],
@@ -1423,6 +1428,30 @@ fn handle_keydown(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
     }
 }
 
+fn wheel_notches(remainder: i32, wparam: WPARAM) -> (i32, i32) {
+    let delta = ((wparam.0 as u32 >> 16) & 0xFFFF) as i16 as i32;
+    let accumulated = remainder + delta;
+    let notches = accumulated / WHEEL_DELTA as i32;
+    (accumulated - notches * WHEEL_DELTA as i32, notches)
+}
+
+fn handle_mouse_wheel(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
+    let (new_remainder, notches) = wheel_notches(ctx.wheel_remainder.get(), wparam);
+    ctx.wheel_remainder.set(new_remainder);
+    if notches == 0 {
+        return;
+    }
+
+    let total = visible_indices(ctx).len();
+    let visible_rows = visible_row_count(hwnd);
+    let lines = -(notches as isize) * WHEEL_LINES_PER_NOTCH;
+    let new_offset = scroll_offset_after_wheel(ctx.scroll_offset.get(), lines, total, visible_rows);
+    if new_offset != ctx.scroll_offset.get() {
+        ctx.scroll_offset.set(new_offset);
+        invalidate(hwnd);
+    }
+}
+
 fn click_y(lparam: LPARAM) -> i32 {
     ((lparam.0 >> 16) & 0xFFFF) as i16 as i32
 }
@@ -1886,6 +1915,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            if let Some(ctx) = ctx_ref(hwnd) {
+                handle_mouse_wheel(hwnd, ctx, wparam);
+            }
+            LRESULT(0)
+        }
         WM_LBUTTONDBLCLK => {
             if let Some(ctx) = ctx_ref(hwnd) {
                 handle_double_click(hwnd, ctx, lparam);
@@ -1946,10 +1981,44 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
 #[cfg(test)]
 mod tests {
-    use super::{row_label, ROW_HEIGHT_PX, WINDOW_WIDTH};
+    use super::{row_label, wheel_notches, ROW_HEIGHT_PX, WINDOW_WIDTH};
     use duplicata_core::filter_strip::Rect as CoreRect;
     use duplicata_core::row_layout::{self, RowBadge};
     use duplicata_core::ClipListItem;
+    use windows::Win32::Foundation::WPARAM;
+
+    fn wparam_with_delta(delta: i16) -> WPARAM {
+        WPARAM(((delta as u16 as u32) << 16) as usize)
+    }
+
+    #[test]
+    fn one_full_notch_forward_yields_one_notch_and_no_remainder() {
+        assert_eq!(wheel_notches(0, wparam_with_delta(120)), (0, 1));
+    }
+
+    #[test]
+    fn one_full_notch_backward_yields_minus_one_notch_and_no_remainder() {
+        assert_eq!(wheel_notches(0, wparam_with_delta(-120)), (0, -1));
+    }
+
+    #[test]
+    fn fractional_deltas_accumulate_until_a_full_notch_completes() {
+        assert_eq!(wheel_notches(0, wparam_with_delta(40)), (40, 0));
+        assert_eq!(wheel_notches(40, wparam_with_delta(40)), (80, 0));
+        assert_eq!(wheel_notches(80, wparam_with_delta(40)), (0, 1));
+    }
+
+    #[test]
+    fn fractional_negative_deltas_accumulate_too() {
+        assert_eq!(wheel_notches(0, wparam_with_delta(-40)), (-40, 0));
+        assert_eq!(wheel_notches(-40, wparam_with_delta(-40)), (-80, 0));
+        assert_eq!(wheel_notches(-80, wparam_with_delta(-40)), (0, -1));
+    }
+
+    #[test]
+    fn a_zero_delta_leaves_the_remainder_untouched() {
+        assert_eq!(wheel_notches(17, wparam_with_delta(0)), (17, 0));
+    }
 
     fn item(preview: Option<&str>, kind: &str, pinned: bool) -> ClipListItem {
         ClipListItem {
