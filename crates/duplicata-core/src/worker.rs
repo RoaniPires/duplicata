@@ -74,6 +74,9 @@ pub fn run_worker(
             WorkItem::DeleteAll { keep_pinned, done } => {
                 let _ = done.send(repo.delete_all(keep_pinned));
             }
+            WorkItem::DeleteOne { clip_id, done } => {
+                let _ = done.send(repo.delete_one(clip_id));
+            }
             WorkItem::ToggleEncryption {
                 enable,
                 progress,

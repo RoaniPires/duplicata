@@ -39,6 +39,7 @@ fn recreate_database_interleaved_with_captures_preserves_every_item_and_never_bl
             | WorkItem::ApplySettings { .. }
             | WorkItem::SetPinned { .. }
             | WorkItem::DeleteAll { .. }
+            | WorkItem::DeleteOne { .. }
             | WorkItem::ToggleEncryption { .. } => {
                 unreachable!("este teste só enfileira Capture e RecreateDatabase")
             }

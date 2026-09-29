@@ -1613,6 +1613,7 @@ fn handle_double_click(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
 const MENU_ID_PIN: usize = 1;
 const MENU_ID_UNPIN: usize = 2;
 const MENU_ID_DELETE_ALL: usize = 3;
+const MENU_ID_DELETE_ONE: usize = 4;
 
 fn handle_context_menu(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     if ctx.error.borrow().is_some() || ctx.toggle.get().is_some() {
@@ -1648,6 +1649,12 @@ fn handle_context_menu(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
                 (MENU_ID_PIN, windows::core::w!("Fixar"))
             };
             let _ = AppendMenuW(menu, MF_STRING, item_id, label);
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                MENU_ID_DELETE_ONE,
+                windows::core::w!("Apagar este item"),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
         let _ = AppendMenuW(
@@ -1674,6 +1681,7 @@ fn handle_context_menu(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     match (chosen, row) {
         (MENU_ID_PIN, Some(idx)) => toggle_pin(hwnd, ctx, idx, true),
         (MENU_ID_UNPIN, Some(idx)) => toggle_pin(hwnd, ctx, idx, false),
+        (MENU_ID_DELETE_ONE, Some(idx)) => delete_one(hwnd, ctx, idx),
         (MENU_ID_DELETE_ALL, _) => trigger_delete_all(hwnd, ctx),
         _ => {}
     }
@@ -1721,6 +1729,70 @@ fn toggle_pin(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize, pin: bool) {
         Err(_) => {
             log_event!(Level::WARN, LogFields::new("clip_pin_failed"));
         }
+    }
+}
+
+/// Apaga o item sob o menu. Em qualquer desfecho a lista é relida do disco:
+/// um erro pode chegar depois de o `DELETE` já ter sido confirmado (falha no
+/// checkpoint, worker caindo antes de responder), então a tela mostra o que
+/// está gravado e o aviso não afirma o resultado — silêncio em vez de
+/// afirmação errada.
+fn delete_one(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize) {
+    let Some(clip_id) = ctx.rows.borrow().get(idx).map(|r| r.id) else {
+        return;
+    };
+    let selected = ctx.selected.get();
+    let scroll = ctx.scroll_offset.get();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    ctx.queue.push(
+        WorkItem::DeleteOne {
+            clip_id,
+            done: done_tx,
+        },
+        0,
+    );
+    let failed_kind = match done_rx.recv() {
+        Ok(Ok(removed)) => {
+            if removed {
+                log_event!(
+                    Level::DEBUG,
+                    LogFields::new("clip_deleted").clip_id(clip_id)
+                );
+            }
+            None
+        }
+        Ok(Err(e)) => Some(error_banner::store_error_kind(&e)),
+        Err(_) => Some("no_response"),
+    };
+
+    refresh_rows(ctx);
+    let visible_len = visible_indices(ctx).len();
+    if let Some((sel, top)) =
+        list_view::view_after_removal(selected, scroll, visible_len, visible_row_count(hwnd))
+    {
+        ctx.selected.set(sel);
+        ctx.scroll_offset.set(top);
+    }
+    invalidate(hwnd);
+
+    let Some(failed_kind) = failed_kind else {
+        return;
+    };
+    log_event!(
+        Level::WARN,
+        LogFields::new("clip_delete_failed")
+            .clip_id(clip_id)
+            .kind(failed_kind)
+    );
+    let title = HSTRING::from("Apagar item — duplicata");
+    let body = HSTRING::from(
+        "Não foi possível confirmar que o item foi apagado. A lista mostra \
+         o que está gravado agora. Tente de novo; se persistir, consulte o log.",
+    );
+    // SAFETY: strings wide NUL-terminadas (via `HSTRING`); `hwnd` visível.
+    unsafe {
+        MessageBoxW(Some(hwnd), &body, &title, MB_OK | MB_ICONWARNING);
     }
 }
 

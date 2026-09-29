@@ -31,6 +31,10 @@ pub enum WorkItem {
         keep_pinned: bool,
         done: mpsc::Sender<Result<u64, StoreError>>,
     },
+    DeleteOne {
+        clip_id: i64,
+        done: mpsc::Sender<Result<bool, StoreError>>,
+    },
 }
 
 pub type HeuristicRejectionSignal = mpsc::Sender<()>;

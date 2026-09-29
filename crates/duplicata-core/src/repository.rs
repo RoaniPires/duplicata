@@ -61,6 +61,10 @@ pub trait HistoryRepository: Send {
 
     fn delete_all(&mut self, keep_pinned: bool) -> Result<u64, StoreError>;
 
+    /// Apaga um único item, fixado ou não. `Ok(false)` quando o id já não
+    /// existe (retenção ou outra remoção chegou antes) — não é erro.
+    fn delete_one(&mut self, clip_id: i64) -> Result<bool, StoreError>;
+
     fn recreate(&mut self) -> Result<(), StoreError>;
 
     fn toggle_encryption(&mut self, enable: bool, progress: &dyn Fn(u64))

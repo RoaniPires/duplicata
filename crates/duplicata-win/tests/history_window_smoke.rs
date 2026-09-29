@@ -448,6 +448,9 @@ impl HistoryRepository for RecordingRepo {
     fn delete_all(&mut self, keep_pinned: bool) -> Result<u64, StoreError> {
         self.inner.delete_all(keep_pinned)
     }
+    fn delete_one(&mut self, clip_id: i64) -> Result<bool, StoreError> {
+        self.inner.delete_one(clip_id)
+    }
     fn recreate(&mut self) -> Result<(), StoreError> {
         self.inner.recreate()
     }

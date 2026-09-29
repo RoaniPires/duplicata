@@ -110,6 +110,9 @@ impl HistoryRepository for FailingHistoryRepository {
     fn delete_all(&mut self, _keep_pinned: bool) -> Result<u64, StoreError> {
         Err(self.error.clone().unwrap_or(StoreError::Query))
     }
+    fn delete_one(&mut self, _clip_id: i64) -> Result<bool, StoreError> {
+        Err(self.error.clone().unwrap_or(StoreError::Query))
+    }
     fn recreate(&mut self) -> Result<(), StoreError> {
         Err(self.error.clone().unwrap_or(StoreError::Query))
     }
@@ -248,6 +251,12 @@ impl HistoryRepository for FakeHistoryRepository {
             self.by_hash.clear();
         }
         Ok((before - self.by_hash.len()) as u64)
+    }
+
+    fn delete_one(&mut self, clip_id: i64) -> Result<bool, StoreError> {
+        let before = self.by_hash.len();
+        self.by_hash.retain(|_, c| c.id != clip_id);
+        Ok(self.by_hash.len() < before)
     }
 
     fn recreate(&mut self) -> Result<(), StoreError> {

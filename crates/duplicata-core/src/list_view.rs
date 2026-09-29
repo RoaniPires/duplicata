@@ -137,3 +137,26 @@ pub fn display_state(
         ListDisplayState::Rows
     }
 }
+
+/// Seleção e scroll depois de remover um item da lista visível: a seleção
+/// fica na mesma posição (o item seguinte ocupa o lugar do apagado), ou no
+/// último se o apagado era o último; o scroll fica onde o usuário deixou,
+/// só recuando o necessário para a página não passar do fim e para a
+/// seleção continuar visível. `None` quando a lista ficou vazia.
+pub fn view_after_removal(
+    selected: usize,
+    scroll: usize,
+    visible_len: usize,
+    rows_per_page: usize,
+) -> Option<(usize, usize)> {
+    let last = visible_len.checked_sub(1)?;
+    let page = rows_per_page.max(1);
+    let sel = selected.min(last);
+    let mut top = scroll.min(visible_len.saturating_sub(page));
+    if sel < top {
+        top = sel;
+    } else if sel >= top + page {
+        top = sel + 1 - page;
+    }
+    Some((sel, top))
+}

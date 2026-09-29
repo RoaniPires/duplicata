@@ -387,6 +387,19 @@ impl HistoryRepository for SqliteHistoryRepository {
         Ok(removed as u64)
     }
 
+    /// O `DELETE` é confirmado antes do checkpoint. Se o checkpoint falhar,
+    /// o item já saiu do banco e o erro volta mesmo assim: o chamador relê a
+    /// lista em vez de afirmar que nada mudou. Resto de página no WAL some no
+    /// próximo checkpoint (`secure_delete` zera as páginas no arquivo).
+    fn delete_one(&mut self, clip_id: i64) -> Result<bool, StoreError> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM clip WHERE id = ?1", [clip_id])
+            .map_err(|e| map_sqlite_error(&e))?;
+        checkpoint_truncate(&self.conn)?;
+        Ok(removed > 0)
+    }
+
     #[cfg(windows)]
     fn toggle_encryption(
         &mut self,
