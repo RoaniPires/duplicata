@@ -22,6 +22,8 @@ pub mod hotkey_dialog;
 #[cfg(windows)]
 pub mod hotkey_win;
 #[cfg(windows)]
+pub mod hover_popup;
+#[cfg(windows)]
 pub mod listener;
 #[cfg(windows)]
 pub mod menu_icon;

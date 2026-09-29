@@ -10,6 +10,7 @@ use duplicata_core::filter_strip::{
     self, adjacent_segment, segment_at_packed, segment_rects_packed, Rect as CoreRect,
 };
 use duplicata_core::hint_strip;
+use duplicata_core::hover_preview::{self, HoverTracker};
 use duplicata_core::list_view::{self, ContentTypeFilter};
 use duplicata_core::row_layout;
 use duplicata_core::translucency;
@@ -22,34 +23,35 @@ use windows::core::HSTRING;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateCompatibleDC, CreateFontIndirectW, CreateSolidBrush, DeleteDC, DeleteObject,
-    DrawTextW, EndPaint, FillRect, InvalidateRect, SelectObject, SetBkMode, SetBrushOrgEx,
-    SetStretchBltMode, SetTextColor, StretchBlt, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE, HDC, HFONT, HGDIOBJ,
-    PAINTSTRUCT, RGBQUAD, SRCCOPY, STRETCH_BLT_MODE, TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateCompatibleDC, CreateFontIndirectW, CreateSolidBrush,
+    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, SelectObject, SetBkMode,
+    SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchBlt, DRAW_TEXT_FORMAT, DT_CENTER,
+    DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE, HDC, HFONT,
+    HGDIOBJ, PAINTSTRUCT, RGBQUAD, SRCCOPY, STRETCH_BLT_MODE, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     BeginBufferedPaint, BufferedPaintSetAlpha, CloseThemeData, DrawThemeTextEx, EndBufferedPaint,
     GetBufferedPaintBits, OpenThemeData, BPBF_TOPDOWNDIB, DTTOPTS, DTT_COMPOSITED, DTT_TEXTCOLOR,
-    HTHEME,
+    HOVER_DEFAULT, HTHEME, WM_MOUSEHOVER, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_P, VK_PRIOR,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
+    GetKeyState, TrackMouseEvent, TME_CANCEL, TME_HOVER, TME_LEAVE, TRACKMOUSEEVENT,
+    TRACKMOUSEEVENT_FLAGS, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_P,
+    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, LoadCursorW, MessageBoxW, PostMessageW,
-    RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
-    CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GUITHREADINFO, GWLP_USERDATA, IDC_ARROW, IDNO, IDYES,
-    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING,
-    SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE, WHEEL_DELTA,
-    WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_PAINT, WM_PASTE, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CAPTION,
-    WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, LoadCursorW, MessageBoxW,
+    PostMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
+    TrackPopupMenu, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GUITHREADINFO, GWLP_USERDATA,
+    IDC_ARROW, IDNO, IDYES, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, MB_YESNOCANCEL,
+    MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WA_INACTIVE, WHEEL_DELTA, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_PASTE, WM_RBUTTONUP, WM_SETTINGCHANGE,
+    WM_THEMECHANGED, WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::app_icon;
@@ -57,6 +59,7 @@ use crate::clipboard_restore;
 use crate::dpi;
 use crate::error_banner;
 use crate::hotkey_win::HOTKEY_ID;
+use crate::hover_popup::{HoverPopup, PopupColors, ShowRequest};
 use crate::navigation::{next_selection_index, row_index_at, scroll_offset_after_wheel, NavKey};
 use crate::paste_injector;
 use crate::system_appearance::SystemAppearance;
@@ -114,6 +117,8 @@ struct HistoryWindowCtx {
     type_filter: Cell<ContentTypeFilter>,
     strip_focused: Cell<bool>,
     max_pinned: Cell<u32>,
+    hover: Cell<HoverTracker>,
+    popup: RefCell<Option<HoverPopup>>,
 }
 
 pub struct HistoryWindow {
@@ -164,6 +169,8 @@ impl HistoryWindow {
             type_filter: Cell::new(ContentTypeFilter::All),
             strip_focused: Cell::new(false),
             max_pinned: Cell::new(DEFAULT_MAX_PINNED),
+            hover: Cell::new(HoverTracker::default()),
+            popup: RefCell::new(None),
         });
 
         // SAFETY: registro de classe idempotente com `wndproc` válido; mesmo
@@ -205,12 +212,31 @@ impl HistoryWindow {
             )
             .map_err(|_| InitError::HistoryWindow)?;
 
+            // O popup é owned pelo histórico. Falhar aqui falha a criação do
+            // histórico inteiro, pelo mesmo erro visível de inicialização —
+            // escolhido de propósito em vez de "sem pré-visualização": se
+            // `CreateWindowExW` recusa um popup vazio, a sessão gráfica está
+            // num estado que o usuário precisa saber.
+            match HoverPopup::new(hwnd) {
+                Ok(popup) => *ctx.popup.borrow_mut() = Some(popup),
+                Err(e) => {
+                    let _ = DestroyWindow(hwnd);
+                    return Err(e);
+                }
+            }
+
             Ok(HistoryWindow { hwnd, _ctx: ctx })
         }
     }
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// Janela do popup de pré-visualização, para os testes de sessão
+    /// gráfica observarem se ela está visível.
+    pub fn hover_popup_hwnd(&self) -> Option<HWND> {
+        self._ctx.popup.borrow().as_ref().map(HoverPopup::hwnd)
     }
 
     pub fn set_max_pinned(&self, max_pinned: u32) {
@@ -220,6 +246,12 @@ impl HistoryWindow {
 
 impl Drop for HistoryWindow {
     fn drop(&mut self) {
+        // O popup sai antes do dono: destruir o dono destruiria o popup por
+        // baixo, e o `Drop` dele chamaria `DestroyWindow` num handle morto.
+        // O `RefMut` morre antes do `Drop` do popup: se `DestroyWindow`
+        // devolver alguma mensagem ao histórico, o `borrow` dela não colide.
+        let popup = self._ctx.popup.borrow_mut().take();
+        drop(popup);
         let font = self._ctx.ui_font.get();
         if !font.is_invalid() {
             // SAFETY: `font` veio de `CreateFontIndirectW` (nossa) e não está
@@ -259,6 +291,7 @@ fn open_window(hwnd: HWND, ctx: &HistoryWindowCtx) {
 }
 
 fn refresh_rows(ctx: &HistoryWindowCtx) {
+    dismiss_hover(ctx);
     let limit = MAX_ROWS + ctx.max_pinned.get() as usize;
     let result = match ctx.reader.borrow().as_ref() {
         Some(r) => r.list_for_display(limit),
@@ -283,6 +316,9 @@ fn refresh_rows(ctx: &HistoryWindowCtx) {
 }
 
 fn hide_window(hwnd: HWND, ctx: &HistoryWindowCtx) {
+    dismiss_hover(ctx);
+    // Com a janela escondida nada mais pede aviso de hover ao sistema.
+    track_mouse(hwnd, TME_CANCEL | TME_HOVER | TME_LEAVE);
     // SAFETY: `hwnd` válido, criado por `HistoryWindow::new`.
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
@@ -400,6 +436,8 @@ fn row_label(item: &ClipListItem) -> String {
 }
 
 fn reload_appearance(hwnd: HWND, ctx: &HistoryWindowCtx) {
+    // Antes de trocar a fonte: o popup desenha com ela.
+    dismiss_hover(ctx);
     let dark = SystemAppearance::read_dark();
     // SAFETY: `hwnd` é a janela de histórico desta thread.
     let backdrop_ok = unsafe { window_material::apply_attributes(hwnd, dark) };
@@ -1323,6 +1361,7 @@ fn on_toggle_done(hwnd: HWND, ctx: &HistoryWindowCtx, failed: bool) {
 }
 
 fn handle_char(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
+    dismiss_hover(ctx);
     let code = wparam.0 as u32;
     match code {
         0x08 => {
@@ -1344,6 +1383,7 @@ fn handle_char(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
 }
 
 fn handle_keydown(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
+    dismiss_hover(ctx);
     let vk = wparam.0 as u16;
 
     if vk == VK_P.0 && ctrl_down() {
@@ -1441,6 +1481,7 @@ fn handle_mouse_wheel(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
     if notches == 0 {
         return;
     }
+    dismiss_hover(ctx);
 
     let total = visible_indices(ctx).len();
     let visible_rows = visible_row_count(hwnd);
@@ -1450,6 +1491,161 @@ fn handle_mouse_wheel(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
         ctx.scroll_offset.set(new_offset);
         invalidate(hwnd);
     }
+}
+
+fn track_mouse(hwnd: HWND, flags: TRACKMOUSEEVENT_FLAGS) {
+    let mut tme = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: flags,
+        hwndTrack: hwnd,
+        dwHoverTime: HOVER_DEFAULT,
+    };
+    // SAFETY: `tme` local, com `cbSize` preenchido; `hwnd` é a janela de
+    // histórico desta thread. Falha só deixa de avisar o hover: sem popup,
+    // que é o lado seguro.
+    let _ = unsafe { TrackMouseEvent(&mut tme) };
+}
+
+fn window_open(hwnd: HWND) -> bool {
+    // SAFETY: `hwnd` válido.
+    unsafe { IsWindowVisible(hwnd) }.as_bool()
+}
+
+/// Posição visível da linha sob o ponto (coordenadas de cliente), só dentro
+/// da área da lista e só com a lista de fato na tela (sem banner).
+fn hover_row_at(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) -> Option<usize> {
+    if ctx.error.borrow().is_some() || ctx.toggle.get().is_some() {
+        return None;
+    }
+    let area = list_area(hwnd);
+    let y = click_y(lparam);
+    if y < area.top || y >= area.bottom {
+        return None;
+    }
+    match list_click_target(hwnd, ctx, lparam) {
+        ListClick::Row { visible_pos, .. } => Some(visible_pos),
+        _ => None,
+    }
+}
+
+/// Único caminho de sumiço do popup, reusado por todos os gatilhos. Esconde
+/// sempre, mesmo que o estado ache que já está escondido: popup velho na
+/// tela é pior que uma chamada a mais.
+fn dismiss_hover(ctx: &HistoryWindowCtx) {
+    let mut tracker = ctx.hover.get();
+    tracker.dismiss();
+    ctx.hover.set(tracker);
+    if let Some(popup) = ctx.popup.borrow().as_ref() {
+        popup.hide();
+    }
+}
+
+fn handle_mouse_move(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
+    let open = window_open(hwnd);
+    let row = if open {
+        hover_row_at(hwnd, ctx, lparam)
+    } else {
+        None
+    };
+    let mut tracker = ctx.hover.get();
+    let effect = tracker.on_move(open, row);
+    ctx.hover.set(tracker);
+    if effect.hide {
+        if let Some(popup) = ctx.popup.borrow().as_ref() {
+            popup.hide();
+        }
+    }
+    if effect.arm {
+        track_mouse(hwnd, TME_HOVER | TME_LEAVE);
+    }
+}
+
+fn handle_mouse_hover(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
+    let open = window_open(hwnd);
+    let row = if open {
+        hover_row_at(hwnd, ctx, lparam)
+    } else {
+        None
+    };
+    let mut tracker = ctx.hover.get();
+    if let Some(pos) = tracker.on_hover(open, row) {
+        if show_hover_preview(hwnd, ctx, pos) {
+            tracker.mark_shown();
+        }
+    }
+    ctx.hover.set(tracker);
+}
+
+fn handle_mouse_leave(ctx: &HistoryWindowCtx) {
+    let mut tracker = ctx.hover.get();
+    tracker.on_leave();
+    ctx.hover.set(tracker);
+    if let Some(popup) = ctx.popup.borrow().as_ref() {
+        popup.hide();
+    }
+}
+
+fn show_hover_preview(hwnd: HWND, ctx: &HistoryWindowCtx, visible_pos: usize) -> bool {
+    let popup_ref = ctx.popup.borrow();
+    let Some(popup) = popup_ref.as_ref() else {
+        return false;
+    };
+    let visible = visible_indices(ctx);
+    let Some(&row_idx) = visible.get(visible_pos) else {
+        return false;
+    };
+    let Some(visible_idx) = visible_pos.checked_sub(ctx.scroll_offset.get()) else {
+        return false;
+    };
+    let rows = ctx.rows.borrow();
+    let Some(item) = rows.get(row_idx) else {
+        return false;
+    };
+
+    let appearance = ctx.appearance.borrow();
+    let dpi = appearance.dpi;
+    let font = ctx.ui_font.get();
+    let client = client_rect(hwnd);
+    let top = client.top + LIST_TOP_PX + (visible_idx as i32) * ROW_HEIGHT_PX;
+    let row_rect = RECT {
+        left: client.left,
+        top,
+        right: client.right,
+        bottom: top + ROW_HEIGHT_PX,
+    };
+    // Item de texto não tem miniatura: o layout da linha é o sem imagem.
+    let text = row_layout::row_layout(core_rect(&row_rect), dpi, None).text;
+    let text_w = text.right - text.left;
+    let fits = |line: &str| text_metrics::width_with_font(font, line) <= text_w;
+    let Some(preview) = hover_preview::hover_preview(item, fits) else {
+        return false;
+    };
+
+    let mut row_origin = POINT { x: 0, y: top };
+    let mut window = RECT::default();
+    // SAFETY: `hwnd` válido; as chamadas só escrevem nos locais.
+    let work = unsafe {
+        let _ = ClientToScreen(hwnd, &mut row_origin);
+        let _ = GetWindowRect(hwnd, &mut window);
+        dpi::monitor_at(row_origin).0
+    };
+
+    popup.show(
+        &preview,
+        &ShowRequest {
+            font,
+            colors: PopupColors {
+                surface: appearance.palette.surface,
+                text: appearance.palette.text_primary,
+                dim: appearance.palette.text_dim,
+                border: appearance.palette.border,
+            },
+            dpi,
+            window: core_rect(&window),
+            row_top: row_origin.y,
+            work: core_rect(&work),
+        },
+    )
 }
 
 fn click_y(lparam: LPARAM) -> i32 {
@@ -1496,6 +1692,7 @@ fn list_click_target(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) -> List
 }
 
 fn handle_single_click(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
+    dismiss_hover(ctx);
     if ctx.error.borrow().is_some() {
         handle_banner_click(hwnd, ctx, lparam);
         return;
@@ -1616,6 +1813,7 @@ const MENU_ID_DELETE_ALL: usize = 3;
 const MENU_ID_DELETE_ONE: usize = 4;
 
 fn handle_context_menu(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
+    dismiss_hover(ctx);
     if ctx.error.borrow().is_some() || ctx.toggle.get().is_some() {
         return;
     }
@@ -1990,6 +2188,24 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_MOUSEWHEEL => {
             if let Some(ctx) = ctx_ref(hwnd) {
                 handle_mouse_wheel(hwnd, ctx, wparam);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(ctx) = ctx_ref(hwnd) {
+                handle_mouse_move(hwnd, ctx, lparam);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEHOVER => {
+            if let Some(ctx) = ctx_ref(hwnd) {
+                handle_mouse_hover(hwnd, ctx, lparam);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            if let Some(ctx) = ctx_ref(hwnd) {
+                handle_mouse_leave(ctx);
             }
             LRESULT(0)
         }

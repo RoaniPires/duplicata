@@ -11,6 +11,7 @@ pub mod filter_strip;
 pub mod heuristic_recovery;
 pub mod hint_strip;
 pub mod hotkey;
+pub mod hover_preview;
 pub mod identity;
 pub mod list_view;
 pub mod log_fields;

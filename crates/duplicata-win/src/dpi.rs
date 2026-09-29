@@ -14,7 +14,7 @@ const DEFAULT_DPI: u32 = 96;
 
 /// # Safety
 /// Nenhuma pré-condição além de `pt` ser uma coordenada de tela válida.
-unsafe fn monitor_at(pt: POINT) -> (RECT, u32) {
+pub(crate) unsafe fn monitor_at(pt: POINT) -> (RECT, u32) {
     // SAFETY: `MONITOR_DEFAULTTONEAREST` sempre devolve um `HMONITOR` válido.
     let hmon: HMONITOR = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
     let mut mi = MONITORINFO {

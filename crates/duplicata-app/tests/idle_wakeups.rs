@@ -304,6 +304,136 @@ fn fatia4_open_theme_switch_type_close_adds_no_periodic_wakeups() {
     );
 }
 
+struct PreviewRows;
+impl HistoryReader for PreviewRows {
+    fn list_for_display(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<duplicata_core::ClipListItem>, StoreError> {
+        Ok(vec![duplicata_core::ClipListItem {
+            id: 1,
+            canonical_kind: "unicode_text".into(),
+            preview: Some(
+                "SELECT *
+  FROM t
+	WHERE x = 1"
+                    .into(),
+            ),
+            thumbnail: None,
+            has_text: true,
+            last_activity_ms: 1,
+            pinned: false,
+        }])
+    }
+    fn get_full(&self, _clip_id: i64) -> Result<Option<duplicata_core::StoredClip>, StoreError> {
+        Ok(None)
+    }
+    fn count_pinned(&self) -> Result<u32, StoreError> {
+        Ok(0)
+    }
+    fn close(self: Box<Self>) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+#[test]
+#[ignore = "leva ~60s e precisa de sessão gráfica"]
+fn hovering_a_row_then_closing_adds_no_periodic_wakeups() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SendMessageW, WM_CLOSE, WM_HOTKEY, WM_MOUSEMOVE,
+    };
+    const WM_MOUSEHOVER: u32 = 0x02A1;
+    // Meio da primeira linha: FILTER_STRIP_PX + SEARCH_BAR_PX (privados em
+    // history_window.rs) + meia linha.
+    const ROW0: isize =
+        ((34 + 30 + duplicata_core::row_layout::ROW_HEIGHT_PX as isize / 2) << 16) | 80;
+
+    let queue: Arc<ByteBudgetQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+    let counters = Arc::new(WorkerCounters::new());
+
+    let worker_queue = Arc::clone(&queue);
+    let worker_counters = Arc::clone(&counters);
+    let worker = thread::spawn(move || {
+        let mut repo = FakeHistoryRepository::new();
+        let cfg = Config::with_paths("db".into(), "logs".into());
+        let (heuristic_tx, _rx) = mpsc::channel();
+        run_worker(
+            worker_queue.as_ref(),
+            &mut repo,
+            &cfg,
+            worker_counters.as_ref(),
+            &heuristic_tx,
+        );
+    });
+
+    let history_queue = Arc::clone(&queue) as Arc<dyn CaptureQueue<WorkItem>>;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let loop_thread = thread::spawn(move || {
+        let history_window = HistoryWindow::new(
+            PreviewRows,
+            || -> Result<Box<dyn HistoryReader>, StoreError> { Ok(Box::new(PreviewRows)) },
+            || true,
+            history_queue,
+            PathBuf::from("db"),
+            Rc::new(SelfWriteFilter::new()),
+        )
+        .expect("criar a janela oculta precisa de sessão gráfica");
+        let hwnd = history_window.hwnd();
+        let popup = history_window
+            .hover_popup_hwnd()
+            .expect("o histórico cria o popup");
+
+        // SAFETY: `hwnd` é a janela recém-criada nesta thread.
+        let shown = unsafe {
+            SendMessageW(hwnd, WM_HOTKEY, Some(WPARAM(1)), Some(LPARAM(0)));
+            SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(0)), Some(LPARAM(ROW0)));
+            SendMessageW(hwnd, WM_MOUSEHOVER, Some(WPARAM(0)), Some(LPARAM(ROW0)));
+            let shown = IsWindowVisible(popup).as_bool();
+            SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+            shown
+        };
+
+        let _ = ready_tx.send((message_loop::current_thread_id(), shown));
+        message_loop::run();
+        drop(history_window);
+    });
+    let (loop_thread_id, popup_was_shown) = ready_rx.recv().expect("janela deve inicializar");
+    assert!(
+        popup_was_shown,
+        "o cenário precisa de fato ter mostrado o popup, senão não prova nada"
+    );
+
+    thread::sleep(Duration::from_secs(1));
+
+    let timer_before = MESSAGE_LOOP_TIMER_WAKEUPS.load(Ordering::Relaxed);
+    let msgloop_before = MESSAGE_LOOP_ITERATIONS.load(Ordering::Relaxed);
+    let processed_before = counters.processed();
+
+    thread::sleep(Duration::from_secs(60));
+
+    let timer_after = MESSAGE_LOOP_TIMER_WAKEUPS.load(Ordering::Relaxed);
+    let msgloop_after = MESSAGE_LOOP_ITERATIONS.load(Ordering::Relaxed);
+    let processed_after = counters.processed();
+
+    message_loop::post_quit_to(loop_thread_id);
+    loop_thread.join().expect("loop não deve travar");
+    queue.close();
+    worker.join().expect("worker não deve travar");
+
+    assert_no_periodic_wakeups(
+        "hovering_a_row_then_closing_adds_no_periodic_wakeups",
+        timer_before,
+        timer_after,
+        msgloop_before,
+        msgloop_after,
+    );
+    assert_eq!(
+        processed_after, processed_before,
+        "a worker não acorda por causa do hover"
+    );
+}
+
 #[test]
 #[ignore = "leva ~60s e precisa de sessão gráfica"]
 fn the_translucent_paint_path_adds_no_periodic_wakeups() {
