@@ -71,9 +71,30 @@ def main() -> None:
             "instalar."
         )
 
+    arp_icon = next(
+        (
+            prop.get("Value")
+            for prop in root.findall(".//w:Property", NS)
+            if prop.get("Id") == "ARPPRODUCTICON"
+        ),
+        None,
+    )
+    if not arp_icon:
+        fail(
+            "Property Id=ARPPRODUCTICON ausente — sem ela o duplicata aparece "
+            "com ícone genérico em Aplicativos instalados e em Programas e "
+            "Recursos."
+        )
+    icon_ids = {icon.get("Id") for icon in root.findall(".//w:Icon", NS)}
+    if arp_icon not in icon_ids:
+        fail(
+            f"ARPPRODUCTICON aponta para {arp_icon!r}, que não está declarado "
+            "em nenhum <Icon> — o MSI não teria o ícone na tabela Icon."
+        )
+
     print("OK: Package/@Scope=perUser, nenhum ServiceInstall/ServiceControl, "
           "Restart Manager desabilitado, MajorUpgrade recusa downgrade, "
-          "cabinet embutido no .msi.")
+          "cabinet embutido no .msi, ARPPRODUCTICON aponta para <Icon> declarado.")
 
 
 if __name__ == "__main__":
