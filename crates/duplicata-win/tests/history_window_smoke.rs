@@ -1021,3 +1021,71 @@ fn opening_with_a_full_history_accepts_the_first_keystroke_within_100ms() {
          SC-010/FR-038 é 100ms"
     );
 }
+
+#[test]
+#[ignore = "precisa de sessão gráfica; o julgamento visual do X é manual (issue #3)"]
+fn the_window_uses_the_standard_caption_and_stays_off_the_taskbar() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GetWindowLongPtrW, IsWindowVisible, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    };
+
+    let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+    let window = HistoryWindow::new(
+        FakeHistoryRepository::new(),
+        || -> Result<Box<dyn HistoryReader>, StoreError> {
+            Ok(Box::new(FakeHistoryRepository::new()))
+        },
+        || true,
+        queue,
+        PathBuf::from("test.db"),
+        Rc::new(SelfWriteFilter::new()),
+    )
+    .expect("criar a janela deve funcionar numa sessão gráfica");
+    let hwnd = window.hwnd();
+
+    // SAFETY: `hwnd` é a janela recém-criada, viva até o fim do teste.
+    let (style, ex_style, owner) = unsafe {
+        (
+            GetWindowLongPtrW(hwnd, GWL_STYLE) as u32,
+            GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32,
+            GetWindow(hwnd, GW_OWNER),
+        )
+    };
+    assert_eq!(
+        ex_style & WS_EX_TOOLWINDOW.0,
+        0,
+        "WS_EX_TOOLWINDOW faz o DWM desenhar o X vermelho de ferramenta"
+    );
+    assert_eq!(
+        ex_style & WS_EX_APPWINDOW.0,
+        0,
+        "WS_EX_APPWINDOW poria a janela na barra de tarefas mesmo com dono"
+    );
+    assert!(
+        owner.as_ref().is_ok_and(|o| !o.is_invalid()),
+        "sem dono a janela ganha botão na barra de tarefas"
+    );
+    let owner = owner.expect("dono checado acima");
+    // SAFETY: `owner` é o dono vivo da janela recém-criada.
+    let (owner_visible, owner_ex_style) = unsafe {
+        (
+            IsWindowVisible(owner).as_bool(),
+            GetWindowLongPtrW(owner, GWL_EXSTYLE) as u32,
+        )
+    };
+    assert!(
+        !owner_visible,
+        "dono visível ganharia o botão na barra de tarefas"
+    );
+    assert_ne!(
+        owner_ex_style & WS_EX_TOOLWINDOW.0,
+        0,
+        "sem WS_EX_TOOLWINDOW o dono entra na barra de tarefas se for exibido"
+    );
+    assert_eq!(
+        style & (WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0),
+        0,
+        "o título mostra só o X, sem minimizar/maximizar"
+    );
+}

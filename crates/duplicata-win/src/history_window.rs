@@ -123,6 +123,7 @@ struct HistoryWindowCtx {
 
 pub struct HistoryWindow {
     hwnd: HWND,
+    owner: HWND,
     _ctx: Box<HistoryWindowCtx>,
 }
 
@@ -178,8 +179,13 @@ impl HistoryWindow {
         // "classe já registrada"). A janela é WS_POPUP com borda/título/menu
         // de sistema normais (WS_CAPTION/WS_SYSMENU/WS_THICKFRAME) — mas SEM
         // WS_VISIBLE: só aparece via `ShowWindow` no ramo de abertura do
-        // WM_HOTKEY. WS_EX_TOOLWINDOW evita entrada persistente na barra de
-        // tarefas.
+        // WM_HOTKEY. Sem WS_EX_TOOLWINDOW de propósito: com ele o DWM desenha
+        // o título de ferramenta, cujo X é um quadrado vermelho em repouso
+        // (issue #3). Quem tira a janela da barra de tarefas é o dono
+        // invisível — janela owned não ganha botão na barra. `STATIC` é
+        // classe de sistema já registrada, criada com `lpParam` nulo (nenhum
+        // ponteiro nosso fica com o dono); todo `DestroyWindow(owner)` roda
+        // nesta mesma thread.
         unsafe {
             let hinstance = GetModuleHandleW(None).map_err(|_| InitError::HistoryWindow)?;
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
@@ -195,9 +201,29 @@ impl HistoryWindow {
             };
             RegisterClassW(&wc);
 
-            let ctx_ptr: *mut HistoryWindowCtx = ctx.as_mut();
-            let hwnd = CreateWindowExW(
+            // Dono nunca exibido, da classe de sistema `STATIC`: sem wndproc
+            // nosso, sem timer, não acorda o processo. Falhar aqui cai no
+            // mesmo erro visível de inicialização do histórico, em vez de
+            // seguir sem dono e ganhar um botão na barra de tarefas.
+            let owner = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
+                windows::core::w!("STATIC"),
+                None,
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .map_err(|_| InitError::HistoryWindow)?;
+
+            let ctx_ptr: *mut HistoryWindowCtx = ctx.as_mut();
+            let hwnd = match CreateWindowExW(
+                Default::default(),
                 CLASS_NAME,
                 WINDOW_TITLE,
                 WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
@@ -205,12 +231,17 @@ impl HistoryWindow {
                 CW_USEDEFAULT,
                 WINDOW_WIDTH,
                 WINDOW_HEIGHT,
-                None,
+                Some(owner),
                 None,
                 Some(hinstance.into()),
                 Some(ctx_ptr.cast()),
-            )
-            .map_err(|_| InitError::HistoryWindow)?;
+            ) {
+                Ok(h) => h,
+                Err(_) => {
+                    let _ = DestroyWindow(owner);
+                    return Err(InitError::HistoryWindow);
+                }
+            };
 
             // O popup é owned pelo histórico. Falhar aqui falha a criação do
             // histórico inteiro, pelo mesmo erro visível de inicialização —
@@ -221,11 +252,16 @@ impl HistoryWindow {
                 Ok(popup) => *ctx.popup.borrow_mut() = Some(popup),
                 Err(e) => {
                     let _ = DestroyWindow(hwnd);
+                    let _ = DestroyWindow(owner);
                     return Err(e);
                 }
             }
 
-            Ok(HistoryWindow { hwnd, _ctx: ctx })
+            Ok(HistoryWindow {
+                hwnd,
+                owner,
+                _ctx: ctx,
+            })
         }
     }
 
@@ -263,9 +299,11 @@ impl Drop for HistoryWindow {
         }
         // SAFETY: `hwnd` foi criado por nós; o processo só chega aqui no
         // shutdown — a janela nunca é destruída/recriada em uso normal
-        // (FR-031).
+        // (FR-031). O dono sai por último: destruí-lo destruiria o histórico
+        // por baixo, e o `DestroyWindow(self.hwnd)` cairia num handle morto.
         unsafe {
             let _ = DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(self.owner);
         }
     }
 }
