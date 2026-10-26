@@ -1089,3 +1089,728 @@ fn the_window_uses_the_standard_caption_and_stays_off_the_taskbar() {
         "o título mostra só o X, sem minimizar/maximizar"
     );
 }
+
+// --- Lixeira na linha (tarefa 01) ---------------------------------------
+//
+// O repositório é um só, dividido entre o worker (que apaga) e a janela (que
+// relê a lista): o que a tela mostra depois do clique é o que está gravado.
+
+mod trash {
+    use super::*;
+    use std::cell::RefCell;
+    use std::thread::JoinHandle;
+
+    use duplicata_core::list_view::ListDisplayState;
+    use duplicata_core::row_layout::ROW_HEIGHT_PX;
+    use duplicata_core::{run_worker, Config, WorkerCounters};
+    use std::sync::atomic::AtomicBool;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{GetUpdateRect, UpdateWindow};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetClassNameW, GetClientRect, GetWindowTextW, IsWindowVisible,
+        PostMessageW, SendMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HCBT_ACTIVATE, HHOOK,
+        WH_CBT, WM_CHAR, WM_CLOSE, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    };
+
+    const LIST_TOP_PX: i32 = 34 + 30; // FILTER_STRIP_PX + SEARCH_BAR_PX (privados)
+    const WM_MOUSEHOVER: u32 = 0x02A1;
+    const WM_MOUSELEAVE: u32 = 0x02A3;
+
+    #[derive(Clone)]
+    struct SharedRepo {
+        inner: Arc<Mutex<FakeHistoryRepository>>,
+        fail_delete: bool,
+        /// Liga a falha na leitura da lista (faixa de erro na próxima recarga).
+        fail_list: Arc<AtomicBool>,
+        get_full_calls: Arc<AtomicUsize>,
+    }
+
+    impl HistoryRepository for SharedRepo {
+        fn upsert(&mut self, record: &CaptureRecord) -> Result<UpsertOutcome, StoreError> {
+            self.inner.lock().unwrap().upsert(record)
+        }
+        fn purge_older_than(&mut self, cutoff_ms: u64) -> Result<u64, StoreError> {
+            self.inner.lock().unwrap().purge_older_than(cutoff_ms)
+        }
+        fn purge_over_count(&mut self, max_items: u32) -> Result<u64, StoreError> {
+            self.inner.lock().unwrap().purge_over_count(max_items)
+        }
+        fn set_pinned(
+            &mut self,
+            clip_id: i64,
+            pinned: bool,
+            max_pinned: u32,
+        ) -> Result<SetPinnedOutcome, StoreError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .set_pinned(clip_id, pinned, max_pinned)
+        }
+        fn delete_all(&mut self, keep_pinned: bool) -> Result<u64, StoreError> {
+            self.inner.lock().unwrap().delete_all(keep_pinned)
+        }
+        fn delete_one(&mut self, clip_id: i64) -> Result<bool, StoreError> {
+            if self.fail_delete {
+                return Err(StoreError::Io);
+            }
+            self.inner.lock().unwrap().delete_one(clip_id)
+        }
+        fn recreate(&mut self) -> Result<(), StoreError> {
+            self.inner.lock().unwrap().recreate()
+        }
+        fn toggle_encryption(
+            &mut self,
+            enable: bool,
+            progress: &dyn Fn(u64),
+        ) -> Result<(), StoreError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .toggle_encryption(enable, progress)
+        }
+    }
+
+    impl HistoryReader for SharedRepo {
+        fn list_for_display(&self, limit: usize) -> Result<Vec<ClipListItem>, StoreError> {
+            if self.fail_list.load(Ordering::SeqCst) {
+                return Err(StoreError::Io);
+            }
+            self.inner.lock().unwrap().list_for_display(limit)
+        }
+        fn get_full(&self, _clip_id: i64) -> Result<Option<StoredClip>, StoreError> {
+            // Contado e nunca devolvido: colar de verdade mexeria na área de
+            // transferência da máquina. Uma chamada aqui é a tentativa de colar.
+            self.get_full_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+        fn count_pinned(&self) -> Result<u32, StoreError> {
+            self.inner.lock().unwrap().count_pinned()
+        }
+        fn close(self: Box<Self>) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
+
+    fn record(tag: u8, preview: &str) -> CaptureRecord {
+        let fmt = unicode_text_format(preview);
+        CaptureRecord {
+            identity: IdentityKey([tag; 32]),
+            canonical: CanonicalSelection {
+                format_id: fmt.format_id,
+                format_name: None,
+                kind: CanonicalKind::UnicodeText,
+                byte_len: fmt.bytes.len() as u64,
+            },
+            captured_at: Timestamp::from_millis(tag as u64),
+            total_bytes: fmt.bytes.len() as u64,
+            preview: Some(preview.to_string()),
+            thumbnail: None,
+            has_text: true,
+            formats: vec![fmt],
+        }
+    }
+
+    #[derive(Default)]
+    struct Setup<'a> {
+        pinned: &'a [&'a str],
+        fail_delete: bool,
+    }
+
+    struct Fixture {
+        window: HistoryWindow,
+        queue: Arc<dyn CaptureQueue<WorkItem>>,
+        worker: Option<JoinHandle<()>>,
+        repo: Arc<Mutex<FakeHistoryRepository>>,
+        get_full_calls: Arc<AtomicUsize>,
+        fail_list: Arc<AtomicBool>,
+        /// Id de cada prévia, para os testes falarem em "A", "B", "C".
+        ids: Vec<(String, i64)>,
+    }
+
+    impl Fixture {
+        /// Lista na ordem da tela (o primeiro é o mais recente).
+        fn new(previews: &[&str]) -> Self {
+            Self::with(previews, Setup::default())
+        }
+
+        fn with(previews: &[&str], setup: Setup<'_>) -> Self {
+            let mut inner = FakeHistoryRepository::new();
+            let mut ids = Vec::new();
+            for (i, p) in previews.iter().rev().enumerate() {
+                let tag = (i + 1) as u8;
+                let id = match inner.upsert(&record(tag, p)).expect("semear") {
+                    UpsertOutcome::Inserted { clip_id } | UpsertOutcome::Deduped { clip_id } => {
+                        clip_id
+                    }
+                };
+                ids.push((p.to_string(), id));
+            }
+            for p in setup.pinned {
+                let id = ids.iter().find(|(n, _)| n == p).expect("fixado existe").1;
+                inner.set_pinned(id, true, 25).expect("fixar");
+            }
+            let repo = Arc::new(Mutex::new(inner));
+            let get_full_calls = Arc::new(AtomicUsize::new(0));
+            let fail_list = Arc::new(AtomicBool::new(false));
+            let shared = SharedRepo {
+                inner: Arc::clone(&repo),
+                fail_delete: setup.fail_delete,
+                fail_list: Arc::clone(&fail_list),
+                get_full_calls: Arc::clone(&get_full_calls),
+            };
+
+            let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+            let worker_queue = Arc::clone(&queue);
+            let mut worker_repo = shared.clone();
+            let worker = thread::spawn(move || {
+                let counters = WorkerCounters::default();
+                let (heuristic_tx, _heuristic_rx) = std::sync::mpsc::channel();
+                run_worker(
+                    worker_queue.as_ref(),
+                    &mut worker_repo,
+                    &Config::with_paths("db".into(), "logs".into()),
+                    &counters,
+                    &heuristic_tx,
+                );
+            });
+
+            let window = HistoryWindow::new(
+                shared,
+                || -> Result<Box<dyn HistoryReader>, StoreError> {
+                    Ok(Box::new(FakeHistoryRepository::new()))
+                },
+                || false,
+                Arc::clone(&queue),
+                PathBuf::from("test.db"),
+                Rc::new(SelfWriteFilter::new()),
+            )
+            .expect("criar a janela");
+            let f = Fixture {
+                window,
+                queue,
+                worker: Some(worker),
+                repo,
+                get_full_calls,
+                fail_list,
+                ids,
+            };
+            f.send(WM_HOTKEY, 1, 0);
+            assert!(f.visible(), "o atalho abre o histórico");
+            f
+        }
+
+        fn hwnd(&self) -> HWND {
+            self.window.hwnd()
+        }
+
+        fn visible(&self) -> bool {
+            // SAFETY: consulta sem pré-condição.
+            unsafe { IsWindowVisible(self.hwnd()) }.as_bool()
+        }
+
+        fn send(&self, msg: u32, wparam: usize, lparam: isize) {
+            // SAFETY: `hwnd` criada nesta thread; `SendMessageW` síncrono.
+            unsafe {
+                SendMessageW(self.hwnd(), msg, Some(WPARAM(wparam)), Some(LPARAM(lparam)));
+            }
+        }
+
+        fn id(&self, preview: &str) -> i64 {
+            self.ids
+                .iter()
+                .find(|(p, _)| p == preview)
+                .expect("prévia semeada")
+                .1
+        }
+
+        fn ids_of(&self, previews: &[&str]) -> Vec<i64> {
+            previews.iter().map(|p| self.id(p)).collect()
+        }
+
+        fn width(&self) -> i32 {
+            let mut client = RECT::default();
+            // SAFETY: `hwnd` válido.
+            unsafe {
+                let _ = GetClientRect(self.hwnd(), &mut client);
+            }
+            client.right - client.left
+        }
+
+        fn row_y(&self, row: usize) -> i32 {
+            LIST_TOP_PX + row as i32 * ROW_HEIGHT_PX + ROW_HEIGHT_PX / 2
+        }
+
+        /// Centro da lixeira da linha `row` (lado = altura da linha, na
+        /// borda direita).
+        fn trash(&self, row: usize) -> isize {
+            point(self.width() - ROW_HEIGHT_PX / 2, self.row_y(row))
+        }
+
+        fn text(&self, row: usize) -> isize {
+            point(80, self.row_y(row))
+        }
+
+        /// Um pixel à esquerda da lixeira: a fresta entre o texto e ela.
+        fn gap(&self, row: usize) -> isize {
+            point(self.width() - ROW_HEIGHT_PX - 1, self.row_y(row))
+        }
+
+        fn click(&self, at: isize) {
+            self.send(WM_LBUTTONDOWN, 0, at);
+        }
+
+        fn stored_ids(&self) -> Vec<i64> {
+            self.repo.lock().unwrap().ids_by_recency()
+        }
+
+        fn has_update_region(&self) -> bool {
+            // SAFETY: `hwnd` válido; `None` só consulta se há região inválida.
+            unsafe { GetUpdateRect(self.hwnd(), None, false) }.as_bool()
+        }
+
+        fn paint_now(&self) {
+            // SAFETY: `hwnd` desta thread; pinta e valida a janela agora.
+            unsafe {
+                let _ = UpdateWindow(self.hwnd());
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.queue.close();
+            if let Some(w) = self.worker.take() {
+                let _ = w.join();
+            }
+        }
+    }
+
+    fn point(x: i32, y: i32) -> isize {
+        (((y as u32 & 0xFFFF) << 16) | (x as u32 & 0xFFFF)) as isize
+    }
+
+    thread_local! {
+        static DIALOG_TITLES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Fecha toda caixa de diálogo que abrir nesta thread (o aviso é modal e
+    /// travaria o teste) e anota o título dela.
+    struct DialogCloser(HHOOK);
+
+    impl DialogCloser {
+        fn install() -> Self {
+            DIALOG_TITLES.with(|t| t.borrow_mut().clear());
+            // SAFETY: gancho só desta thread, retirado no `Drop`.
+            let hook = unsafe {
+                SetWindowsHookExW(WH_CBT, Some(close_dialogs), None, GetCurrentThreadId())
+            }
+            .expect("instalar o gancho CBT");
+            DialogCloser(hook)
+        }
+
+        fn titles(&self) -> Vec<String> {
+            DIALOG_TITLES.with(|t| t.borrow().clone())
+        }
+    }
+
+    impl Drop for DialogCloser {
+        fn drop(&mut self) {
+            // SAFETY: o gancho instalado em `install`.
+            unsafe {
+                let _ = UnhookWindowsHookEx(self.0);
+            }
+        }
+    }
+
+    unsafe extern "system" fn close_dialogs(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code == HCBT_ACTIVATE as i32 {
+            let hwnd = HWND(wparam.0 as *mut core::ffi::c_void);
+            let mut class = [0u16; 64];
+            // SAFETY: `hwnd` é a janela sendo ativada; buffers locais.
+            let n = unsafe { GetClassNameW(hwnd, &mut class) };
+            if String::from_utf16_lossy(&class[..n.max(0) as usize]) == "#32770" {
+                let mut title = [0u16; 256];
+                // SAFETY: idem.
+                let n = unsafe { GetWindowTextW(hwnd, &mut title) };
+                let title = String::from_utf16_lossy(&title[..n.max(0) as usize]);
+                DIALOG_TITLES.with(|t| t.borrow_mut().push(title));
+                // SAFETY: fecha o diálogo assim que o laço modal dele rodar.
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+        // SAFETY: repassa ao próximo gancho, como a API pede.
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    const ABCD: [&str; 4] = ["A", "B", "C", "D"];
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn the_trash_of_another_row_deletes_it_and_the_selection_stays_on_its_item() {
+        let f = Fixture::new(&ABCD);
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+        f.click(f.trash(2));
+        assert_eq!(f.stored_ids(), f.ids_of(&["A", "B", "D"]));
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "B", "D"]));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+        assert!(f.visible(), "a janela continua aberta");
+        assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0, "nada colado");
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn deleting_a_row_above_the_selection_keeps_the_selection_on_its_item() {
+        let f = Fixture::new(&ABCD);
+        f.click(f.text(2));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+        f.click(f.trash(0));
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["B", "C", "D"]));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn deleting_the_selected_row_selects_the_item_that_took_its_place() {
+        let f = Fixture::new(&ABCD);
+        f.click(f.text(1));
+        f.click(f.trash(1));
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "C", "D"]));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn deleting_the_selected_last_row_selects_the_new_last() {
+        let f = Fixture::new(&["A", "B", "C"]);
+        f.click(f.text(2));
+        f.click(f.trash(2));
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "B"]));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("B")));
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn the_trash_deletes_a_pinned_item_too() {
+        let f = Fixture::with(
+            &["P", "A", "B"],
+            Setup {
+                pinned: &["P"],
+                ..Setup::default()
+            },
+        );
+        assert_eq!(f.window.visible_clip_ids()[0], f.id("P"), "fixado no topo");
+        assert_eq!(f.window.pinned_boundary(), Some(1), "faixa de fixados");
+        f.click(f.trash(0));
+        assert_eq!(f.stored_ids(), f.ids_of(&["A", "B"]));
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "B"]));
+        assert_eq!(f.window.pinned_boundary(), None, "P era o único fixado");
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn the_trash_deletes_the_last_item_matching_the_filter() {
+        let f = Fixture::new(&["outra", "minha senha", "mais uma"]);
+        for ch in "senha".chars() {
+            f.send(WM_CHAR, ch as usize, 0);
+        }
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["minha senha"]));
+        f.click(f.trash(0));
+        assert_eq!(f.window.visible_clip_ids(), Vec::<i64>::new());
+        assert_eq!(f.stored_ids(), f.ids_of(&["outra", "mais uma"]));
+        assert_eq!(
+            f.window.list_display_state(),
+            ListDisplayState::NoMatch,
+            "aparece \"Nenhum item corresponde ao filtro\""
+        );
+        f.paint_now(); // "Nenhum item corresponde ao filtro", sem lixeira
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn deleting_the_only_item_leaves_the_empty_list() {
+        let f = Fixture::new(&["Z"]);
+        f.click(f.trash(0));
+        assert!(f.stored_ids().is_empty());
+        assert!(f.window.visible_clip_ids().is_empty());
+        assert_eq!(f.window.selected_clip_id(), None);
+        assert_eq!(
+            f.window.list_display_state(),
+            ListDisplayState::EmptyHistory
+        );
+        f.paint_now();
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; o aviso modal é fechado por um gancho CBT"]
+    fn a_failed_delete_rereads_the_list_and_warns() {
+        let f = Fixture::with(
+            &["A", "B", "C"],
+            Setup {
+                fail_delete: true,
+                ..Setup::default()
+            },
+        );
+        let closer = DialogCloser::install();
+        f.click(f.trash(1));
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "B", "C"]));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+        assert_eq!(closer.titles(), vec!["Apagar item — duplicata".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn a_click_on_the_text_or_on_the_gap_only_selects() {
+        let f = Fixture::new(&ABCD);
+        f.click(f.text(1));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("B")));
+        f.click(f.gap(2));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+        assert_eq!(f.stored_ids(), f.ids_of(&ABCD), "nada foi apagado");
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn with_the_error_banner_a_click_on_the_trash_spot_deletes_nothing() {
+        let f = Fixture::new(&["A", "B"]);
+        // A recarga depois de apagar B falha: a faixa de erro toma a tela.
+        f.fail_list.store(true, Ordering::SeqCst);
+        f.click(f.trash(1));
+        assert_eq!(f.stored_ids(), f.ids_of(&["A"]));
+
+        f.click(f.trash(0));
+        f.send(WM_LBUTTONDBLCLK, 0, f.trash(0));
+        assert_eq!(f.stored_ids(), f.ids_of(&["A"]), "nada mais foi apagado");
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn a_double_click_on_the_trash_deletes_exactly_one_item_and_pastes_nothing() {
+        let f = Fixture::new(&["A", "B", "C"]);
+        f.send(WM_LBUTTONDOWN, 0, f.trash(0));
+        f.send(WM_LBUTTONDBLCLK, 0, f.trash(0));
+        assert_eq!(f.stored_ids(), f.ids_of(&["B", "C"]), "B continua gravado");
+        assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["B", "C"]));
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("B")));
+        assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0, "nada colado");
+        assert!(f.visible());
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn a_double_click_on_the_text_still_pastes() {
+        let f = Fixture::new(&["A", "B", "C"]);
+        f.send(WM_LBUTTONDOWN, 0, f.text(1));
+        f.send(WM_LBUTTONDBLCLK, 0, f.text(1));
+        assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 1, "tentou colar");
+        assert_eq!(f.stored_ids(), f.ids_of(&["A", "B", "C"]));
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn the_preview_hides_over_the_trash_and_does_not_reopen_there() {
+        let long = "SELECT id, nome\n  FROM cliente\n\tWHERE ativo = 1\nORDER BY nome";
+        let f = Fixture::new(&[long, "curto"]);
+        let popup = f
+            .window
+            .hover_popup_hwnd()
+            .expect("o histórico cria o popup");
+        // SAFETY: consulta sem pré-condição.
+        let popup_visible = || unsafe { IsWindowVisible(popup) }.as_bool();
+
+        f.send(WM_MOUSEMOVE, 0, f.text(0));
+        f.send(WM_MOUSEHOVER, 0, f.text(0));
+        assert!(popup_visible(), "no texto a pré-visualização abre");
+
+        f.send(WM_MOUSEMOVE, 0, f.trash(0));
+        assert!(!popup_visible(), "entrar na lixeira esconde");
+        f.send(WM_MOUSEHOVER, 0, f.trash(0));
+        assert!(!popup_visible(), "parado na lixeira não reabre");
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; redimensiona uma janela real"]
+    fn the_strip_below_the_last_drawn_row_is_not_a_row() {
+        use duplicata_core::hint_strip::HINT_STRIP_PX;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+        };
+
+        let names: Vec<String> = (0..40).map(|i| format!("item {i:02}")).collect();
+        let previews: Vec<&str> = names.iter().map(String::as_str).collect();
+        let f = Fixture::new(&previews);
+
+        let client_h = || {
+            let mut c = RECT::default();
+            // SAFETY: `hwnd` válido.
+            unsafe {
+                let _ = GetClientRect(f.hwnd(), &mut c);
+            }
+            c.bottom - c.top
+        };
+        let leftover = |h: i32| (h - LIST_TOP_PX - HINT_STRIP_PX).max(0) % ROW_HEIGHT_PX;
+        if leftover(client_h()) == 0 {
+            // Sem sobra: cresce a janela alguns pixels para abrir a faixa.
+            let mut w = RECT::default();
+            // SAFETY: `hwnd` desta thread; só escreve locais e redimensiona.
+            unsafe {
+                let _ = GetWindowRect(f.hwnd(), &mut w);
+                let _ = SetWindowPos(
+                    f.hwnd(),
+                    None,
+                    0,
+                    0,
+                    w.right - w.left,
+                    w.bottom - w.top + 5,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        let h = client_h();
+        assert!(
+            leftover(h) > 0,
+            "o teste precisa de sobra abaixo das linhas"
+        );
+        let rows = (h - LIST_TOP_PX - HINT_STRIP_PX) / ROW_HEIGHT_PX;
+        assert!((rows as usize) < previews.len(), "mais itens que a página");
+
+        // Primeiro pixel abaixo da última linha desenhada, onde a lixeira da
+        // linha seguinte (não desenhada) estaria.
+        let below = point(
+            f.width() - ROW_HEIGHT_PX / 2,
+            LIST_TOP_PX + rows * ROW_HEIGHT_PX,
+        );
+        let before = f.stored_ids();
+        f.click(below);
+        f.send(WM_LBUTTONDBLCLK, 0, below);
+        assert_eq!(f.stored_ids(), before, "nada foi apagado");
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("item 00")));
+    }
+
+    /// Garante sobra abaixo das linhas (cresce a janela se preciso) e devolve
+    /// quantas linhas a pintura desenha.
+    fn drawn_rows_with_leftover(f: &Fixture) -> i32 {
+        use duplicata_core::hint_strip::HINT_STRIP_PX;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+        };
+        let client_h = || {
+            let mut c = RECT::default();
+            // SAFETY: `hwnd` válido.
+            unsafe {
+                let _ = GetClientRect(f.hwnd(), &mut c);
+            }
+            c.bottom - c.top
+        };
+        let leftover = |h: i32| (h - LIST_TOP_PX - HINT_STRIP_PX).max(0) % ROW_HEIGHT_PX;
+        if leftover(client_h()) == 0 {
+            let mut w = RECT::default();
+            // SAFETY: `hwnd` desta thread; só escreve locais e redimensiona.
+            unsafe {
+                let _ = GetWindowRect(f.hwnd(), &mut w);
+                let _ = SetWindowPos(
+                    f.hwnd(),
+                    None,
+                    0,
+                    0,
+                    w.right - w.left,
+                    w.bottom - w.top + 5,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        let h = client_h();
+        assert!(
+            leftover(h) > 0,
+            "o teste precisa de sobra abaixo das linhas"
+        );
+        (h - LIST_TOP_PX - HINT_STRIP_PX) / ROW_HEIGHT_PX
+    }
+
+    fn forty() -> Vec<String> {
+        (0..40).map(|i| format!("item {i:02}")).collect()
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; redimensiona uma janela real"]
+    fn the_last_drawn_row_trash_deletes_that_row_with_leftover_below() {
+        let names = forty();
+        let previews: Vec<&str> = names.iter().map(String::as_str).collect();
+        let f = Fixture::new(&previews);
+        let rows = drawn_rows_with_leftover(&f);
+        let before = f.stored_ids();
+        f.click(f.trash((rows - 1) as usize));
+        let deleted: Vec<i64> = before
+            .iter()
+            .copied()
+            .filter(|id| !f.stored_ids().contains(id))
+            .collect();
+        assert_eq!(deleted, vec![f.id(&format!("item {:02}", rows - 1))]);
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; redimensiona uma janela real"]
+    fn scrolled_to_the_end_the_last_drawn_row_trash_deletes_the_last_item() {
+        use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+        const VK_END: usize = 0x23;
+        let names = forty();
+        let previews: Vec<&str> = names.iter().map(String::as_str).collect();
+        let f = Fixture::new(&previews);
+        let rows = drawn_rows_with_leftover(&f);
+        f.send(WM_KEYDOWN, VK_END, 0);
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("item 39")));
+
+        let before = f.stored_ids();
+        f.click(f.trash((rows - 1) as usize));
+        let after = f.stored_ids();
+        assert_eq!(after.len(), before.len() - 1);
+        assert!(
+            !after.contains(&f.id("item 39")),
+            "a última linha desenhada é a última"
+        );
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+    fn below_a_list_shorter_than_the_page_the_trash_spot_hits_nothing() {
+        let f = Fixture::new(&["A", "B", "C"]);
+        let below = f.trash(3);
+        let before = f.stored_ids();
+        f.click(below);
+        f.send(WM_LBUTTONDBLCLK, 0, below);
+        assert_eq!(f.stored_ids(), before);
+        assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; pinta a janela de verdade"]
+    fn the_mouse_repaints_only_when_the_hot_row_or_zone_changes() {
+        let f = Fixture::new(&ABCD);
+        f.paint_now();
+        assert!(!f.has_update_region());
+
+        // Seleção em A, mouse sobre o texto de C: pinta A e C com lixeira.
+        f.send(WM_MOUSEMOVE, 0, f.text(2));
+        assert!(f.has_update_region(), "a linha sob o mouse mudou");
+        f.paint_now();
+
+        f.send(WM_MOUSEMOVE, 0, point(120, f.row_y(2)));
+        assert!(
+            !f.has_update_region(),
+            "mesma linha, mesma zona: nada a pintar"
+        );
+
+        f.send(WM_MOUSEMOVE, 0, f.trash(2));
+        assert!(f.has_update_region(), "entrou na lixeira: fundo do hover");
+        f.paint_now();
+
+        f.send(WM_MOUSELEAVE, 0, 0);
+        assert!(f.has_update_region(), "o mouse saiu: a lixeira de C some");
+        f.paint_now();
+
+        f.send(WM_MOUSELEAVE, 0, 0);
+        assert!(!f.has_update_region(), "saída repetida não repinta");
+    }
+}

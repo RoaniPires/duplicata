@@ -160,3 +160,23 @@ pub fn view_after_removal(
     }
     Some((sel, top))
 }
+
+/// Seleção e scroll depois de apagar um item qualquer da lista visível.
+/// `kept_pos` é a nova posição do item que estava selecionado, quando ele
+/// continua na lista; `None` quando o apagado era o próprio selecionado (a
+/// seleção fica em `prev_selected`, o item que ocupou o lugar dele). Depois,
+/// o mesmo ajuste de [`view_after_removal`]. `None` quando a lista ficou vazia.
+pub fn view_after_delete(
+    kept_pos: Option<usize>,
+    prev_selected: usize,
+    scroll: usize,
+    visible_len: usize,
+    rows_per_page: usize,
+) -> Option<(usize, usize)> {
+    view_after_removal(
+        kept_pos.unwrap_or(prev_selected),
+        scroll,
+        visible_len,
+        rows_per_page,
+    )
+}

@@ -78,3 +78,12 @@ pub fn worst_case_contrast_translucent(text: Rgb, surface: Rgb, alpha: u8) -> f6
     }
     contrast_ratio(text, white).min(contrast_ratio(text, black))
 }
+
+/// Fundo sutil de um botão sob o mouse (como minimizar/maximizar do
+/// Windows 11): um pouco da cor do texto sobre a base.
+pub fn subtle_hover_fill(base: Rgb, fg: Rgb) -> Rgb {
+    composite_over(fg, base, HOVER_FILL_ALPHA)
+}
+
+/// Quanto da cor do texto entra no fundo do botão sob o mouse (~6%).
+pub const HOVER_FILL_ALPHA: u8 = 16;

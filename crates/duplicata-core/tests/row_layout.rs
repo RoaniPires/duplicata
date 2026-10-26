@@ -1,9 +1,10 @@
 use duplicata_core::filter_strip::Rect;
 use duplicata_core::hint_strip::HINT_STRIP_PX;
 use duplicata_core::row_layout::{
-    badge_of, client_height_at, pin_reserved_px, row_layout, rows_that_fit, scale_px,
-    thumbnail_target, RowBadge, MIN_VISIBLE_ROWS, ROW_HEIGHT_PX, THUMBNAIL_MARGIN_PX,
-    THUMBNAIL_MAX_WIDTH_PX, WINDOW_FRAME_ALLOWANCE_PX, WINDOW_HEIGHT_PX, WINDOW_WIDTH_PX,
+    badge_of, client_height_at, delete_button_rect, pin_reserved_px, row_layout,
+    row_layout_with_delete, rows_that_fit, scale_px, thumbnail_target, RowBadge, MIN_VISIBLE_ROWS,
+    ROW_HEIGHT_PX, TEXT_GAP_PX, THUMBNAIL_MARGIN_PX, THUMBNAIL_MAX_WIDTH_PX,
+    WINDOW_FRAME_ALLOWANCE_PX, WINDOW_HEIGHT_PX, WINDOW_WIDTH_PX,
 };
 
 fn row_width(dpi: u32) -> i32 {
@@ -290,4 +291,80 @@ fn rows_that_fit_never_goes_negative_or_divides_by_zero() {
     assert_eq!(rows_that_fit(10, 100, ROW_HEIGHT_PX), 0);
     assert_eq!(rows_that_fit(100, 0, 0), 0);
     assert_eq!(rows_that_fit(-5, 0, ROW_HEIGHT_PX), 0);
+}
+
+#[test]
+fn the_delete_button_is_a_square_as_tall_as_the_row_at_every_scale() {
+    for dpi in ALL_SCALES {
+        let r = Rect {
+            left: 4,
+            top: 56,
+            right: 4 + row_width(dpi),
+            bottom: 56 + ROW_HEIGHT_PX,
+        };
+        let b = delete_button_rect(r, dpi);
+        assert_eq!(b.bottom - b.top, ROW_HEIGHT_PX, "dpi={dpi}");
+        assert_eq!(b.right - b.left, ROW_HEIGHT_PX, "dpi={dpi}: quadrado");
+        assert_eq!(b.top, r.top, "dpi={dpi}");
+        assert_eq!(b.bottom, r.bottom, "dpi={dpi}");
+    }
+}
+
+#[test]
+fn the_delete_button_hugs_the_right_edge() {
+    let r = row(row_width(96), ROW_HEIGHT_PX);
+    assert_eq!(delete_button_rect(r, 96).right, r.right);
+}
+
+#[test]
+fn only_the_row_showing_the_delete_button_gets_a_shorter_text() {
+    for dpi in ALL_SCALES {
+        let r = row(row_width(dpi), ROW_HEIGHT_PX);
+        for thumb in [None, Some((128u32, 72u32))] {
+            let with = row_layout_with_delete(r, dpi, thumb, true);
+            let without = row_layout_with_delete(r, dpi, thumb, false);
+            let button = with.delete_button.expect("linha com lixeira");
+            assert_eq!(button, delete_button_rect(r, dpi), "dpi={dpi}");
+            assert!(with.text.right < without.text.right, "dpi={dpi} {thumb:?}");
+            assert_eq!(with.text.left, without.text.left, "dpi={dpi} {thumb:?}");
+            assert_eq!(without.text.right, r.right, "dpi={dpi}: largura de hoje");
+            assert_eq!(without.delete_button, None);
+        }
+    }
+}
+
+#[test]
+fn the_text_stops_a_gap_before_the_delete_button() {
+    for dpi in ALL_SCALES {
+        let r = row(row_width(dpi), ROW_HEIGHT_PX);
+        let l = row_layout_with_delete(r, dpi, None, true);
+        let button = l.delete_button.expect("linha com lixeira");
+        assert_eq!(
+            l.text.right,
+            button.left - scale_px(TEXT_GAP_PX, dpi),
+            "dpi={dpi}"
+        );
+    }
+}
+
+#[test]
+fn a_narrow_row_with_the_delete_button_never_gets_a_negative_text_width() {
+    for width in [0, 10, 40, 60, 80] {
+        let r = row(width, ROW_HEIGHT_PX);
+        let l = row_layout_with_delete(r, 96, Some((128, 72)), true);
+        assert!(l.text.left <= l.text.right, "largura {width}: {:?}", l.text);
+    }
+}
+
+#[test]
+fn the_layout_without_the_delete_button_is_exactly_row_layout() {
+    for dpi in ALL_SCALES {
+        let r = row(row_width(dpi), ROW_HEIGHT_PX);
+        for thumb in [None, Some((128u32, 72u32)), Some((0, 10))] {
+            assert_eq!(
+                row_layout_with_delete(r, dpi, thumb, false),
+                row_layout(r, dpi, thumb)
+            );
+        }
+    }
 }

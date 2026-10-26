@@ -105,9 +105,39 @@ pub struct RowLayout {
     pub type_badge: Rect,
     pub thumbnail: Rect,
     pub text: Rect,
+    /// Lixeira na ponta direita, só nas linhas que a mostram.
+    pub delete_button: Option<Rect>,
+}
+
+/// Quadrado da lixeira: lado igual à altura da linha, encostado na borda
+/// direita e ocupando a altura toda da linha.
+///
+/// `dpi` não entra na conta: o lado é a altura real de `row`, que já vem na
+/// escala da janela (só o glifo escala com o DPI). O parâmetro fica para a
+/// assinatura acompanhar a de [`row_layout`] e a de quem a chama.
+pub fn delete_button_rect(row: Rect, dpi: u32) -> Rect {
+    let _ = dpi;
+    let side = (row.bottom - row.top).max(0);
+    Rect {
+        left: (row.right - side).max(row.left),
+        top: row.top,
+        right: row.right,
+        bottom: row.bottom,
+    }
 }
 
 pub fn row_layout(row: Rect, dpi: u32, thumbnail: Option<(u32, u32)>) -> RowLayout {
+    row_layout_with_delete(row, dpi, thumbnail, false)
+}
+
+/// Como [`row_layout`], mas com a lixeira quando `show_delete`: o texto
+/// termina uma fresta antes dela, nunca antes do próprio começo.
+pub fn row_layout_with_delete(
+    row: Rect,
+    dpi: u32,
+    thumbnail: Option<(u32, u32)>,
+    show_delete: bool,
+) -> RowLayout {
     let stripe_w = scale_px(PIN_STRIPE_PX, dpi);
     let gutter = scale_px(PIN_GUTTER_PX, dpi);
     let badge_w = scale_px(TYPE_BADGE_PX, dpi);
@@ -157,6 +187,11 @@ pub fn row_layout(row: Rect, dpi: u32, thumbnail: Option<(u32, u32)>) -> RowLayo
     };
 
     let text_left = (cursor + gap).min(row.right);
+    let delete_button = show_delete.then(|| delete_button_rect(row, dpi));
+    let text_right = match delete_button {
+        Some(button) => (button.left - gap).max(text_left),
+        None => row.right,
+    };
     RowLayout {
         pin_stripe,
         type_badge,
@@ -164,8 +199,9 @@ pub fn row_layout(row: Rect, dpi: u32, thumbnail: Option<(u32, u32)>) -> RowLayo
         text: Rect {
             left: text_left,
             top: row.top,
-            right: row.right,
+            right: text_right,
             bottom: row.bottom,
         },
+        delete_button,
     }
 }

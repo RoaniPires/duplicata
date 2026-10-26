@@ -6,6 +6,9 @@ use std::sync::Arc;
 use std::thread;
 
 use duplicata_core::config::DEFAULT_MAX_PINNED;
+use duplicata_core::delete_button::{
+    self, ClickGuard, DoubleClickAction, DownAction, RowZone, DELETE_GLYPH, DELETE_GLYPH_PX,
+};
 use duplicata_core::filter_strip::{
     self, adjacent_segment, segment_at_packed, segment_rects_packed, Rect as CoreRect,
 };
@@ -13,6 +16,7 @@ use duplicata_core::hint_strip;
 use duplicata_core::hover_preview::{self, HoverTracker};
 use duplicata_core::list_view::{self, ContentTypeFilter};
 use duplicata_core::row_layout;
+use duplicata_core::theme;
 use duplicata_core::translucency;
 use duplicata_core::{
     log_event, should_suppress_reopen, CaptureQueue, ClipListItem, Clock, HistoryReader, InitError,
@@ -24,10 +28,11 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, CreateCompatibleDC, CreateFontIndirectW, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, SelectObject, SetBkMode,
-    SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchBlt, DRAW_TEXT_FORMAT, DT_CENTER,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE, HDC, HFONT,
-    HGDIOBJ, PAINTSTRUCT, RGBQUAD, SRCCOPY, STRETCH_BLT_MODE, TRANSPARENT,
+    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetTextFaceW, InvalidateRect,
+    SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchBlt,
+    DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, HALFTONE, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, RGBQUAD,
+    SRCCOPY, STRETCH_BLT_MODE, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -62,7 +67,7 @@ use crate::hotkey_win::HOTKEY_ID;
 use crate::hover_popup::{HoverPopup, PopupColors, ShowRequest};
 use crate::navigation::{next_selection_index, row_index_at, scroll_offset_after_wheel, NavKey};
 use crate::paste_injector;
-use crate::system_appearance::SystemAppearance;
+use crate::system_appearance::{self, SystemAppearance};
 use crate::text_metrics;
 use crate::thumbnail_gdi::ThumbnailCache;
 use crate::win_clock::WinClock;
@@ -113,12 +118,20 @@ struct HistoryWindowCtx {
     toggle: Cell<Option<ToggleUi>>,
     appearance: RefCell<SystemAppearance>,
     ui_font: Cell<HFONT>,
+    /// Fonte de ícones do sistema, só para o glifo da lixeira.
+    icon_font: Cell<HFONT>,
     filter_text: RefCell<String>,
     type_filter: Cell<ContentTypeFilter>,
     strip_focused: Cell<bool>,
     max_pinned: Cell<u32>,
     hover: Cell<HoverTracker>,
     popup: RefCell<Option<HoverPopup>>,
+    /// Último ponto do mouse dentro da janela (cliente); `None` fora dela.
+    mouse_at: Cell<Option<POINT>>,
+    /// Linha e zona sob o mouse na última pintura: o movimento só invalida
+    /// quando elas mudam.
+    hot_painted: Cell<Option<(usize, RowZone)>>,
+    click_guard: Cell<ClickGuard>,
 }
 
 pub struct HistoryWindow {
@@ -166,12 +179,16 @@ impl HistoryWindow {
             toggle: Cell::new(None),
             appearance: RefCell::new(SystemAppearance::system_defaults()),
             ui_font: Cell::new(HFONT::default()),
+            icon_font: Cell::new(HFONT::default()),
             filter_text: RefCell::new(String::new()),
             type_filter: Cell::new(ContentTypeFilter::All),
             strip_focused: Cell::new(false),
             max_pinned: Cell::new(DEFAULT_MAX_PINNED),
             hover: Cell::new(HoverTracker::default()),
             popup: RefCell::new(None),
+            mouse_at: Cell::new(None),
+            hot_painted: Cell::new(None),
+            click_guard: Cell::new(ClickGuard::default()),
         });
 
         // SAFETY: registro de classe idempotente com `wndproc` válido; mesmo
@@ -275,6 +292,37 @@ impl HistoryWindow {
         self._ctx.popup.borrow().as_ref().map(HoverPopup::hwnd)
     }
 
+    /// Observador para os testes de sessão gráfica: ids da lista visível, na
+    /// ordem da tela.
+    #[doc(hidden)]
+    pub fn visible_clip_ids(&self) -> Vec<i64> {
+        let rows = self._ctx.rows.borrow();
+        visible_indices(&self._ctx)
+            .into_iter()
+            .map(|i| rows[i].id)
+            .collect()
+    }
+
+    /// Observador para os testes de sessão gráfica: id do item selecionado.
+    #[doc(hidden)]
+    pub fn selected_clip_id(&self) -> Option<i64> {
+        selected_clip_id(&self._ctx)
+    }
+
+    /// Observador para os testes de sessão gráfica: o que a área da lista
+    /// mostra, pela mesma conta da pintura.
+    #[doc(hidden)]
+    pub fn list_display_state(&self) -> list_view::ListDisplayState {
+        list_display_state(&self._ctx)
+    }
+
+    /// Observador para os testes de sessão gráfica: onde a pintura põe a
+    /// linha que separa os fixados dos demais.
+    #[doc(hidden)]
+    pub fn pinned_boundary(&self) -> Option<usize> {
+        pinned_boundary(&self._ctx)
+    }
+
     pub fn set_max_pinned(&self, max_pinned: u32) {
         self._ctx.max_pinned.set(max_pinned);
     }
@@ -288,15 +336,8 @@ impl Drop for HistoryWindow {
         // devolver alguma mensagem ao histórico, o `borrow` dela não colide.
         let popup = self._ctx.popup.borrow_mut().take();
         drop(popup);
-        let font = self._ctx.ui_font.get();
-        if !font.is_invalid() {
-            // SAFETY: `font` veio de `CreateFontIndirectW` (nossa) e não está
-            // mais selecionado em nenhum DC — o `paint` sempre restaura o
-            // objeto anterior antes de retornar.
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(font.0));
-            }
-        }
+        delete_font(self._ctx.ui_font.get());
+        delete_font(self._ctx.icon_font.get());
         // SAFETY: `hwnd` foi criado por nós; o processo só chega aqui no
         // shutdown — a janela nunca é destruída/recriada em uso normal
         // (FR-031). O dono sai por último: destruí-lo destruiria o histórico
@@ -357,6 +398,7 @@ fn hide_window(hwnd: HWND, ctx: &HistoryWindowCtx) {
     dismiss_hover(ctx);
     // Com a janela escondida nada mais pede aviso de hover ao sistema.
     track_mouse(hwnd, TME_CANCEL | TME_HOVER | TME_LEAVE);
+    ctx.mouse_at.set(None);
     // SAFETY: `hwnd` válido, criado por `HistoryWindow::new`.
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
@@ -500,21 +542,80 @@ fn reload_appearance(hwnd: HWND, ctx: &HistoryWindowCtx) {
 
     // SAFETY: `message_font` foi preenchido por `SPI_GETNONCLIENTMETRICS`.
     let new_font = unsafe { CreateFontIndirectW(&appearance.message_font) };
-    let old_font = ctx.ui_font.replace(if new_font.is_invalid() {
+    delete_font(ctx.ui_font.replace(if new_font.is_invalid() {
         HFONT::default()
     } else {
         new_font
-    });
-    if !old_font.is_invalid() {
-        // SAFETY: `old_font` é nossa e não está selecionada em nenhum DC agora
-        // — `paint` sempre restaura o objeto anterior antes de retornar.
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(old_font.0));
-        }
-    }
+    }));
+    delete_font(ctx.icon_font.replace(create_icon_font(appearance.dpi)));
 
     *ctx.appearance.borrow_mut() = appearance;
     invalidate(hwnd);
+}
+
+/// Libera uma fonte nossa; a inválida (nenhuma criada) é ignorada.
+fn delete_font(font: HFONT) {
+    if !font.is_invalid() {
+        // SAFETY: `font` veio de `CreateFontIndirectW` (nossa) e não está
+        // selecionada em nenhum DC — `paint` e `flush_text` sempre restauram o
+        // objeto anterior antes de retornar.
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
+    }
+}
+
+/// Fontes de ícones do Windows, na ordem de preferência: a do Windows 11 e a
+/// do Windows 10, que têm a lixeira no mesmo código.
+const ICON_FONT_FACES: [&str; 2] = ["Segoe Fluent Icons", "Segoe MDL2 Assets"];
+
+/// Fonte de ícones para o glifo da lixeira, com a altura escalada pelo DPI.
+/// Sem nenhuma das fontes instaladas devolve a inválida: o glifo sai na
+/// fonte de interface (o botão continua no lugar e clicável).
+fn create_icon_font(dpi: u32) -> HFONT {
+    for face in ICON_FONT_FACES {
+        let mut lf = LOGFONTW {
+            lfHeight: -row_layout::scale_px(DELETE_GLYPH_PX, dpi),
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        for (dst, src) in lf.lfFaceName.iter_mut().zip(face.encode_utf16()) {
+            *dst = src;
+        }
+        // SAFETY: `lf` é um local preenchido, com o nome NUL-terminado (o
+        // array começa zerado e os nomes acima têm menos de 32 caracteres).
+        let font = unsafe { CreateFontIndirectW(&lf) };
+        if font.is_invalid() {
+            continue;
+        }
+        // O GDI troca por outra fonte em silêncio quando a pedida não existe.
+        if face_of(font).eq_ignore_ascii_case(face) {
+            return font;
+        }
+        delete_font(font);
+    }
+    HFONT::default()
+}
+
+/// Nome da fonte que o GDI de fato entrega para `font`.
+fn face_of(font: HFONT) -> String {
+    let mut name = [0u16; 64];
+    // SAFETY: DC de memória criado e destruído aqui; `font` é válida e volta a
+    // ser desselecionada antes do `DeleteDC`.
+    let len = unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return String::new();
+        }
+        let old = SelectObject(dc, HGDIOBJ(font.0));
+        let len = GetTextFaceW(dc, Some(&mut name));
+        SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+        len
+    };
+    let len = (len.max(0) as usize).min(name.len());
+    let end = name[..len].iter().position(|&c| c == 0).unwrap_or(len);
+    String::from_utf16_lossy(&name[..end])
 }
 
 fn is_immersive_color_set(lparam: LPARAM) -> bool {
@@ -650,6 +751,8 @@ struct TextRun {
     text: Vec<u16>,
     color: COLORREF,
     flags: DRAW_TEXT_FORMAT,
+    /// Fonte só deste texto; `None` usa a de interface já selecionada.
+    font: Option<HFONT>,
 }
 
 #[derive(Default)]
@@ -660,11 +763,23 @@ struct PaintSink {
 
 impl PaintSink {
     fn text(&mut self, rect: RECT, text: &str, color: COLORREF, flags: DRAW_TEXT_FORMAT) {
+        self.text_in(rect, text, color, flags, None);
+    }
+
+    fn text_in(
+        &mut self,
+        rect: RECT,
+        text: &str,
+        color: COLORREF,
+        flags: DRAW_TEXT_FORMAT,
+        font: Option<HFONT>,
+    ) {
         self.runs.push(TextRun {
             rect,
             text: text.encode_utf16().chain(std::iter::once(0)).collect(),
             color,
             flags,
+            font: font.filter(|f| !f.is_invalid()),
         });
     }
 
@@ -676,6 +791,9 @@ impl PaintSink {
 fn flush_text(hdc: HDC, theme: Option<HTHEME>, sink: &mut PaintSink) {
     for run in sink.runs.iter_mut() {
         let mut rect = run.rect;
+        // SAFETY: `hdc` válido; a fonte é nossa, viva até o Drop da janela, e
+        // o objeto anterior volta logo depois do desenho, abaixo.
+        let previous_font = run.font.map(|f| unsafe { SelectObject(hdc, HGDIOBJ(f.0)) });
         match theme {
             Some(t) => {
                 let opts = DTTOPTS {
@@ -707,6 +825,12 @@ fn flush_text(hdc: HDC, theme: Option<HTHEME>, sink: &mut PaintSink) {
                     SetTextColor(hdc, run.color);
                     DrawTextW(hdc, &mut run.text, &mut rect, run.flags);
                 }
+            }
+        }
+        if let Some(previous) = previous_font {
+            // SAFETY: devolve ao `hdc` o objeto que estava selecionado.
+            unsafe {
+                SelectObject(hdc, previous);
             }
         }
     }
@@ -789,6 +913,11 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
     let mut sink = PaintSink::default();
     let mut banner: Option<CoreRect> = None;
 
+    // Recalculada do ponto a cada pintura: a lista pode ter rolado ou mudado
+    // embaixo de um mouse parado. Com faixa ou sem linhas, nenhuma.
+    let hot = hot_target(hwnd, ctx);
+    ctx.hot_painted.set(hot);
+
     if let Some(t) = ctx.toggle.get() {
         paint_toggle_banner(dc, client, t, &colors);
         banner = Some(core_rect(&client));
@@ -827,9 +956,7 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
     let list_top = client.top + LIST_TOP_PX;
     let dpi = appearance.dpi;
 
-    let filter_active =
-        !ctx.filter_text.borrow().is_empty() || ctx.type_filter.get() != ContentTypeFilter::All;
-    let state = list_view::display_state(false, false, rows.len(), visible.len(), filter_active);
+    let state = list_display_state(ctx);
     if state == list_view::ListDisplayState::NoMatch {
         let msg_rect = RECT {
             left: client.left + 16,
@@ -854,13 +981,7 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
     for (visible_idx, &row_idx) in visible.iter().skip(scroll).take(visible_rows).enumerate() {
         let item = &rows[row_idx];
         let pos = scroll + visible_idx;
-        let top = list_top + (visible_idx as i32) * ROW_HEIGHT_PX;
-        let row_rect = RECT {
-            left: client.left,
-            top,
-            right: client.right,
-            bottom: top + ROW_HEIGHT_PX,
-        };
+        let row_rect = row_rect(client, visible_idx);
         let is_selected = pos == selected;
 
         // Seleção: par de realce do sistema (FR-003), sem cálculo de contraste
@@ -886,8 +1007,12 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
                 .borrow_mut()
                 .get_or_decode(item.id, bytes)
         });
-        let layout =
-            row_layout::row_layout(core_rect(&row_rect), dpi, thumb.map(|(_, bw, bh)| (bw, bh)));
+        let layout = row_layout::row_layout_with_delete(
+            core_rect(&row_rect),
+            dpi,
+            thumb.map(|(_, bw, bh)| (bw, bh)),
+            delete_button::shows_delete_button(pos, selected, hot.map(|(p, _)| p)),
+        );
 
         if item.pinned {
             let stripe = win_rect(&layout.pin_stripe);
@@ -958,9 +1083,40 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
             row_fg,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
         );
+
+        if let Some(button) = layout.delete_button {
+            let button = win_rect(&button);
+            let (base, fg, glyph) = if is_selected {
+                (
+                    colors.selection_bg,
+                    colors.selection_fg,
+                    colors.selection_fg,
+                )
+            } else {
+                (colors.surface, colors.text_primary, colors.text_dim)
+            };
+            if hot == Some((pos, RowZone::DeleteButton)) {
+                let fill = system_appearance::from_core(theme::subtle_hover_fill(
+                    system_appearance::to_core(base),
+                    system_appearance::to_core(fg),
+                ));
+                // SAFETY: `dc` válido; `button` dentro de `row_rect`.
+                unsafe {
+                    fill_solid(dc, &button, fill);
+                }
+                sink.opaque(&button);
+            }
+            sink.text_in(
+                button,
+                DELETE_GLYPH.encode_utf8(&mut [0; 4]),
+                glyph,
+                DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                Some(ctx.icon_font.get()),
+            );
+        }
     }
 
-    if let Some(boundary) = list_view::pinned_group_boundary(&rows, &visible) {
+    if let Some(boundary) = pinned_boundary(ctx) {
         if boundary > scroll && boundary < scroll + visible_rows {
             let y = list_top + ((boundary - scroll) as i32) * ROW_HEIGHT_PX;
             let sep = RECT {
@@ -1549,21 +1705,88 @@ fn window_open(hwnd: HWND) -> bool {
     unsafe { IsWindowVisible(hwnd) }.as_bool()
 }
 
-/// Posição visível da linha sob o ponto (coordenadas de cliente), só dentro
-/// da área da lista e só com a lista de fato na tela (sem banner).
-fn hover_row_at(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) -> Option<usize> {
+/// O que a área da lista mostra: faixa, "nenhum item corresponde", lista
+/// vazia ou linhas. A pintura e o observador de teste usam esta mesma conta.
+fn list_display_state(ctx: &HistoryWindowCtx) -> list_view::ListDisplayState {
+    let filter_active =
+        !ctx.filter_text.borrow().is_empty() || ctx.type_filter.get() != ContentTypeFilter::All;
+    list_view::display_state(
+        ctx.toggle.get().is_some(),
+        ctx.error.borrow().is_some(),
+        ctx.rows.borrow().len(),
+        visible_indices(ctx).len(),
+        filter_active,
+    )
+}
+
+/// Posição visível onde termina o grupo de fixados (a linha separadora);
+/// `None` sem fixados ou só com fixados.
+fn pinned_boundary(ctx: &HistoryWindowCtx) -> Option<usize> {
+    list_view::pinned_group_boundary(&ctx.rows.borrow(), &visible_indices(ctx))
+}
+
+/// Retângulo da linha na posição `visible_idx` da página (0 = primeira
+/// linha visível), na largura toda do cliente.
+fn row_rect(client: RECT, visible_idx: usize) -> RECT {
+    let top = client.top + LIST_TOP_PX + (visible_idx as i32) * ROW_HEIGHT_PX;
+    RECT {
+        left: client.left,
+        top,
+        right: client.right,
+        bottom: top + ROW_HEIGHT_PX,
+    }
+}
+
+/// Posição visível da linha desenhada sob `y` (coordenada de cliente). A
+/// pintura só desenha `visible_row_count` linhas; a sobra abaixo da última
+/// (a altura da área raramente é múltiplo da linha) não é linha nenhuma.
+fn drawn_row_at(hwnd: HWND, y: i32, scroll: usize, total: usize) -> Option<usize> {
+    row_index_at(y - LIST_TOP_PX, ROW_HEIGHT_PX, scroll, total)
+        .filter(|&pos| pos < scroll + visible_row_count(hwnd))
+}
+
+#[derive(Clone, Copy)]
+struct RowHit {
+    visible_pos: usize,
+    row_idx: usize,
+    zone: RowZone,
+}
+
+/// Linha e zona sob o ponto (coordenadas de cliente), só dentro da área da
+/// lista e só com a lista de fato na tela (sem faixa de erro nem de
+/// criptografia).
+fn row_hit(hwnd: HWND, ctx: &HistoryWindowCtx, x: i32, y: i32) -> Option<RowHit> {
     if ctx.error.borrow().is_some() || ctx.toggle.get().is_some() {
         return None;
     }
     let area = list_area(hwnd);
-    let y = click_y(lparam);
-    if y < area.top || y >= area.bottom {
+    if y < area.top || y >= area.bottom || x < area.left || x >= area.right {
         return None;
     }
-    match list_click_target(hwnd, ctx, lparam) {
-        ListClick::Row { visible_pos, .. } => Some(visible_pos),
-        _ => None,
-    }
+    let visible = visible_indices(ctx);
+    let scroll = ctx.scroll_offset.get();
+    let visible_pos = drawn_row_at(hwnd, y, scroll, visible.len())?;
+    let row = row_rect(client_rect(hwnd), visible_pos - scroll);
+    let dpi = ctx.appearance.borrow().dpi;
+    Some(RowHit {
+        visible_pos,
+        row_idx: visible[visible_pos],
+        zone: delete_button::zone_at(x, y, core_rect(&row), dpi),
+    })
+}
+
+/// Linha e zona sob o último ponto conhecido do mouse.
+fn hot_target(hwnd: HWND, ctx: &HistoryWindowCtx) -> Option<(usize, RowZone)> {
+    let p = ctx.mouse_at.get()?;
+    row_hit(hwnd, ctx, p.x, p.y).map(|h| (h.visible_pos, h.zone))
+}
+
+/// Posição visível da linha sob o ponto para a pré-visualização: nenhuma
+/// sobre a lixeira, onde ela não abre e, se aberta, some.
+fn hover_row_at(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) -> Option<usize> {
+    row_hit(hwnd, ctx, click_x(lparam), click_y(lparam))
+        .filter(|h| h.zone == RowZone::Body)
+        .map(|h| h.visible_pos)
 }
 
 /// Único caminho de sumiço do popup, reusado por todos os gatilhos. Esconde
@@ -1580,6 +1803,9 @@ fn dismiss_hover(ctx: &HistoryWindowCtx) {
 
 fn handle_mouse_move(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     let open = window_open(hwnd);
+    if open {
+        track_hot_row(hwnd, ctx, lparam);
+    }
     let row = if open {
         hover_row_at(hwnd, ctx, lparam)
     } else {
@@ -1614,7 +1840,29 @@ fn handle_mouse_hover(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     ctx.hover.set(tracker);
 }
 
-fn handle_mouse_leave(ctx: &HistoryWindowCtx) {
+/// Guarda o ponto do mouse e repinta só quando a linha ou a zona sob ele
+/// mudou em relação à última pintura. Ao entrar na janela pede o aviso de
+/// saída (`WM_MOUSELEAVE`), para a lixeira sumir quando o mouse sai; sem
+/// timer nem consulta periódica.
+fn track_hot_row(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
+    let entered = ctx.mouse_at.get().is_none();
+    ctx.mouse_at.set(Some(POINT {
+        x: click_x(lparam),
+        y: click_y(lparam),
+    }));
+    if entered {
+        track_mouse(hwnd, TME_LEAVE);
+    }
+    if hot_target(hwnd, ctx) != ctx.hot_painted.get() {
+        invalidate(hwnd);
+    }
+}
+
+fn handle_mouse_leave(hwnd: HWND, ctx: &HistoryWindowCtx) {
+    ctx.mouse_at.set(None);
+    if ctx.hot_painted.get().is_some() {
+        invalidate(hwnd);
+    }
     let mut tracker = ctx.hover.get();
     tracker.on_leave();
     ctx.hover.set(tracker);
@@ -1643,16 +1891,11 @@ fn show_hover_preview(hwnd: HWND, ctx: &HistoryWindowCtx, visible_pos: usize) ->
     let appearance = ctx.appearance.borrow();
     let dpi = appearance.dpi;
     let font = ctx.ui_font.get();
-    let client = client_rect(hwnd);
-    let top = client.top + LIST_TOP_PX + (visible_idx as i32) * ROW_HEIGHT_PX;
-    let row_rect = RECT {
-        left: client.left,
-        top,
-        right: client.right,
-        bottom: top + ROW_HEIGHT_PX,
-    };
-    // Item de texto não tem miniatura: o layout da linha é o sem imagem.
-    let text = row_layout::row_layout(core_rect(&row_rect), dpi, None).text;
+    let row_rect = row_rect(client_rect(hwnd), visible_idx);
+    let top = row_rect.top;
+    // Item de texto não tem miniatura: o layout da linha é o sem imagem. A
+    // linha sob o mouse mostra a lixeira, que encurta o texto.
+    let text = row_layout::row_layout_with_delete(core_rect(&row_rect), dpi, None, true).text;
     let text_w = text.right - text.left;
     let fits = |line: &str| text_metrics::width_with_font(font, line) <= text_w;
     let Some(preview) = hover_preview::hover_preview(item, fits) else {
@@ -1715,12 +1958,7 @@ fn list_click_target(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) -> List
         return ListClick::None;
     }
     let visible = visible_indices(ctx);
-    match row_index_at(
-        y - LIST_TOP_PX,
-        ROW_HEIGHT_PX,
-        ctx.scroll_offset.get(),
-        visible.len(),
-    ) {
+    match drawn_row_at(hwnd, y, ctx.scroll_offset.get(), visible.len()) {
         Some(visible_pos) => ListClick::Row {
             visible_pos,
             row_idx: visible[visible_pos],
@@ -1733,6 +1971,15 @@ fn handle_single_click(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     dismiss_hover(ctx);
     if ctx.error.borrow().is_some() {
         handle_banner_click(hwnd, ctx, lparam);
+        return;
+    }
+    let hit = row_hit(hwnd, ctx, click_x(lparam), click_y(lparam));
+    let mut guard = ctx.click_guard.get();
+    let action = guard.on_down(hit.map_or(RowZone::Body, |h| h.zone));
+    ctx.click_guard.set(guard);
+    if let (DownAction::Delete, Some(h)) = (action, hit) {
+        // A lixeira não mexe na seleção nem no foco da faixa de filtro.
+        delete_one(hwnd, ctx, h.row_idx);
         return;
     }
     match list_click_target(hwnd, ctx, lparam) {
@@ -1837,6 +2084,20 @@ fn reopen_and_refresh(ctx: &HistoryWindowCtx) {
 }
 
 fn handle_double_click(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
+    let hit = row_hit(hwnd, ctx, click_x(lparam), click_y(lparam));
+    let mut guard = ctx.click_guard.get();
+    let action = guard.on_double_click(hit.map_or(RowZone::Body, |h| h.zone));
+    ctx.click_guard.set(guard);
+    match (action, hit) {
+        // O segundo clique de um duplo clique na lixeira: a linha embaixo já
+        // é outro item, que ninguém escolheu.
+        (DoubleClickAction::Ignore, _) => return,
+        (DoubleClickAction::Delete, Some(h)) => {
+            delete_one(hwnd, ctx, h.row_idx);
+            return;
+        }
+        (DoubleClickAction::Delete, None) | (DoubleClickAction::Paste, _) => {}
+    }
     if let ListClick::Row { row_idx, .. } = list_click_target(hwnd, ctx, lparam) {
         let clip_id = ctx.rows.borrow().get(row_idx).map(|r| r.id);
         if let Some(clip_id) = clip_id {
@@ -1968,16 +2229,19 @@ fn toggle_pin(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize, pin: bool) {
     }
 }
 
-/// Apaga o item sob o menu. Em qualquer desfecho a lista é relida do disco:
-/// um erro pode chegar depois de o `DELETE` já ter sido confirmado (falha no
-/// checkpoint, worker caindo antes de responder), então a tela mostra o que
-/// está gravado e o aviso não afirma o resultado — silêncio em vez de
-/// afirmação errada.
+/// Apaga o item da linha `idx` (pelo menu ou pela lixeira). Em qualquer
+/// desfecho a lista é relida do disco: um erro pode chegar depois de o
+/// `DELETE` já ter sido confirmado (falha no checkpoint, worker caindo antes
+/// de responder), então a tela mostra o que está gravado e o aviso não
+/// afirma o resultado — silêncio em vez de afirmação errada. A seleção segue
+/// o item que estava selecionado; se foi ele o apagado, fica na mesma
+/// posição.
 fn delete_one(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize) {
     let Some(clip_id) = ctx.rows.borrow().get(idx).map(|r| r.id) else {
         return;
     };
     let selected = ctx.selected.get();
+    let selected_id = selected_clip_id(ctx);
     let scroll = ctx.scroll_offset.get();
 
     let (done_tx, done_rx) = mpsc::channel();
@@ -2003,10 +2267,18 @@ fn delete_one(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize) {
     };
 
     refresh_rows(ctx);
-    let visible_len = visible_indices(ctx).len();
-    if let Some((sel, top)) =
-        list_view::view_after_removal(selected, scroll, visible_len, visible_row_count(hwnd))
-    {
+    let visible = visible_indices(ctx);
+    let kept_pos = selected_id.and_then(|id| {
+        let rows = ctx.rows.borrow();
+        visible.iter().position(|&i| rows[i].id == id)
+    });
+    if let Some((sel, top)) = list_view::view_after_delete(
+        kept_pos,
+        selected,
+        scroll,
+        visible.len(),
+        visible_row_count(hwnd),
+    ) {
         ctx.selected.set(sel);
         ctx.scroll_offset.set(top);
     }
@@ -2243,7 +2515,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_MOUSELEAVE => {
             if let Some(ctx) = ctx_ref(hwnd) {
-                handle_mouse_leave(ctx);
+                handle_mouse_leave(hwnd, ctx);
             }
             LRESULT(0)
         }

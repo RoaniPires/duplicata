@@ -6,6 +6,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod clock;
 pub mod config;
+pub mod delete_button;
 pub mod error;
 pub mod filter_strip;
 pub mod heuristic_recovery;

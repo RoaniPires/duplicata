@@ -30,8 +30,16 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
-const fn from_core(c: duplicata_core::theme::Rgb) -> COLORREF {
+pub(crate) const fn from_core(c: duplicata_core::theme::Rgb) -> COLORREF {
     rgb(c.r, c.g, c.b)
+}
+
+pub(crate) const fn to_core(c: COLORREF) -> duplicata_core::theme::Rgb {
+    duplicata_core::theme::Rgb::new(
+        (c.0 & 0xFF) as u8,
+        ((c.0 >> 8) & 0xFF) as u8,
+        ((c.0 >> 16) & 0xFF) as u8,
+    )
 }
 
 pub const fn theme_palette(dark: bool) -> ThemePalette {

@@ -1,5 +1,5 @@
 use duplicata_core::theme::{
-    composite_over, contrast_ratio, relative_luminance, theme_colors,
+    composite_over, contrast_ratio, relative_luminance, subtle_hover_fill, theme_colors,
     worst_case_contrast_translucent, Rgb, MIN_HINT_CONTRAST,
 };
 use duplicata_core::translucency::TRANSLUCENT_ALPHA;
@@ -132,4 +132,41 @@ fn the_two_themes_really_are_different_palettes() {
     assert_ne!(light.surface, dark.surface);
     assert_ne!(light.text_dim, dark.text_dim);
     assert!(relative_luminance(light.surface) > relative_luminance(dark.surface));
+}
+
+#[test]
+fn the_hover_fill_is_visibly_different_from_the_base_in_both_themes() {
+    for dark in [false, true] {
+        let c = theme_colors(dark);
+        let fill = subtle_hover_fill(c.surface, c.text_primary);
+        assert_ne!(fill, c.surface, "tema dark={dark}");
+        let ratio = contrast_ratio(fill, c.surface);
+        assert!(
+            ratio < 1.5,
+            "tema dark={dark}: o fundo tem de ser sutil, veio {ratio:.2}:1"
+        );
+    }
+}
+
+#[test]
+fn the_trash_glyph_stays_readable_over_the_hover_fill() {
+    for dark in [false, true] {
+        let c = theme_colors(dark);
+        let fill = subtle_hover_fill(c.surface, c.text_primary);
+        let ratio = contrast_ratio(c.text_dim, fill);
+        assert!(
+            ratio >= MIN_HINT_CONTRAST,
+            "tema dark={dark}: glifo sobre o fundo do hover dá {ratio:.2}:1"
+        );
+    }
+}
+
+#[test]
+fn the_hover_fill_leans_toward_the_glyph_colour() {
+    let base = Rgb::new(0x20, 0x20, 0x20);
+    let fg = Rgb::new(0xFF, 0xFF, 0xFF);
+    assert!(subtle_hover_fill(base, fg).r > base.r);
+    let base = Rgb::new(0xF0, 0xF0, 0xF0);
+    let fg = Rgb::new(0, 0, 0);
+    assert!(subtle_hover_fill(base, fg).r < base.r);
 }
