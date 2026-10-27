@@ -68,7 +68,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 .github/scripts/check_wxs_invariants.py installer/duplicata.wxs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked -q -p duplicata-core --example wxs_invariants -- installer/duplicata.wxs
 
   no-force-kill:
     runs-on: ubuntu-latest

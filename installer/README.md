@@ -43,6 +43,49 @@ wix build installer\duplicata.wxs `
   -o installer\bin\duplicata.msi
 ```
 
+## Verificar as invariantes do `.wxs`
+
+Depois de editar o `duplicata.wxs`, e antes do push, rode na raiz do
+repositório (só precisa da toolchain Rust, em Windows ou Linux):
+
+```powershell
+cargo run -p duplicata-core --example wxs_invariants -- installer/duplicata.wxs
+```
+
+O comando confere seis regras:
+
+1. Existe `<Package>` com `Scope="perUser"`: a instalação é por usuário e não
+   pede elevação de administrador.
+2. Não há `<ServiceInstall>` nem `<ServiceControl>` em lugar nenhum: o
+   duplicata não é registrado como serviço do Windows.
+3. Existe `<Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable">`: o
+   Restart Manager fica desligado, e o instalador não fecha o duplicata como
+   fim de sessão (o que deixaria a cópia de trabalho do histórico em texto
+   claro no disco).
+4. Existe `<MajorUpgrade>` com `AllowDowngrades="no"`: ninguém instala uma
+   versão mais antiga por cima e deixa o histórico protegido ilegível.
+5. Existe `<Media>` com `EmbedCab="yes"`: o cabinet vai dentro do `.msi`, e
+   baixar só o `.msi` da release basta para instalar.
+6. Existe `<Property Id="ARPPRODUCTICON">` com um `Value` que é o `Id` de algum
+   `<Icon>` declarado: o duplicata aparece com o próprio ícone em Aplicativos
+   instalados.
+
+Os elementos são procurados no namespace do WiX v4, e os valores são
+comparados exatamente (`PerUser` não é `perUser`). Com tudo certo, o comando
+imprime uma linha `OK: ...` com as seis regras e sai com 0. Cada regra
+quebrada vira uma linha `::error::<mensagem>` (o formato de anotação do GitHub
+Actions), na ordem acima, e o comando sai com falha depois de listar todas.
+Arquivo inexistente, XML inválido ou argumento errado também saem com uma
+linha `::error::` e falha.
+
+O mesmo comando roda no job `wxs-invariants` do CI. Além dele, o teste
+`crates/duplicata-core/tests/wxs_invariants.rs` aplica a verificação ao
+`duplicata.wxs` versionado em todo `cargo test --workspace`, mostrando as
+mesmas mensagens quando falha. O comando é um *example* do `duplicata-core`
+(`crates/duplicata-core/examples/wxs_invariants/`): o leitor de XML que ele
+usa (`roxmltree`) é só dependência de desenvolvimento e não entra no build do
+`duplicata.exe`.
+
 ## Estrutura
 
 - `duplicata.wxs` — definição do pacote MSI. `UpgradeCode` é **fixo para

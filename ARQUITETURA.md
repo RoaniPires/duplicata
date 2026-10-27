@@ -164,7 +164,8 @@ cargo test -p duplicata-app --test idle_wakeups -- --ignored --test-threads=1
 A CI roda, além do conjunto acima em Windows, o `duplicata-core` sozinho em
 Linux — é o que prova a fronteira de plataforma —, um lint que proíbe hooks de
 teclado e temporizadores periódicos, um lint que proíbe encerramento forçado
-de processo, e um verificador que faz parse do instalador e reprova se o
+de processo, e um verificador (`cargo run -p duplicata-core --example
+wxs_invariants -- installer/duplicata.wxs`) que faz parse do instalador e reprova se o
 escopo deixar de ser por usuário, se aparecer instalação de serviço, se o
 Restart Manager for reativado ou se o downgrade passar a ser permitido.
 
