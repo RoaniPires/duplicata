@@ -180,3 +180,30 @@ pub fn view_after_delete(
         rows_per_page,
     )
 }
+
+/// Seleção e scroll padrão ao abrir o histórico ou ao mudar os filtros: a
+/// seleção vai para o item visível de maior recência (`last_activity_ms`,
+/// desempate pelo maior `id`, o mesmo critério do store), fixado ou não. O
+/// scroll parte do topo e rola o mínimo para a seleção aparecer, com o mesmo
+/// ajuste de [`view_after_removal`].
+///
+/// `visible` são índices em `items`, na ordem de exibição (a de
+/// [`visible_rows`]); o selecionado devolvido é a posição dentro de `visible`.
+/// `rows_per_page` 0 conta como 1. `None` quando não há item visível.
+///
+/// # Panics
+///
+/// Se algum índice de `visible` não existir em `items`. Vindo de
+/// [`visible_rows`] sobre o mesmo `items`, isso não acontece.
+#[must_use]
+pub fn default_view(
+    items: &[ClipListItem],
+    visible: &[usize],
+    rows_per_page: usize,
+) -> Option<(usize, usize)> {
+    let (selected, _) = visible
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &i)| (items[i].last_activity_ms, items[i].id))?;
+    view_after_removal(selected, 0, visible.len(), rows_per_page)
+}

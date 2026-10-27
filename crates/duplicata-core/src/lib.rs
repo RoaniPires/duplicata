@@ -55,8 +55,8 @@ pub use hotkey::{
 };
 pub use identity::{identity_of, IdentityKey};
 pub use list_view::{
-    arrange_for_display, category_of, display_state, pinned_group_boundary, text_matches,
-    visible_rows, ContentTypeFilter, ListDisplayState,
+    arrange_for_display, category_of, default_view, display_state, pinned_group_boundary,
+    text_matches, visible_rows, ContentTypeFilter, ListDisplayState,
 };
 pub use log_fields::LogFields;
 pub use menu_icon::{best_entry, premultiply_bgra, settings_ico_for, IcoEntry};

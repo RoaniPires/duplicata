@@ -363,10 +363,26 @@ fn open_window(hwnd: HWND, ctx: &HistoryWindowCtx) {
     // SAFETY: `hwnd` é a janela criada por `HistoryWindow::new`.
     unsafe {
         dpi::place_window_near_cursor(hwnd);
+    }
+    // Depois de posicionar: a troca de monitor pode mudar o DPI e, com ele,
+    // o tamanho da janela e quantas linhas cabem na página.
+    apply_default_view(hwnd, ctx);
+    // SAFETY: `hwnd` é a janela criada por `HistoryWindow::new`.
+    unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
     }
     invalidate(hwnd);
+}
+
+/// Seleciona a cópia mais recente entre os itens visíveis (fixada ou não) e
+/// rola o mínimo para ela aparecer. Sem item visível, volta ao topo.
+fn apply_default_view(hwnd: HWND, ctx: &HistoryWindowCtx) {
+    let visible = visible_indices(ctx);
+    let view = list_view::default_view(&ctx.rows.borrow(), &visible, visible_row_count(hwnd));
+    let (selected, scroll) = view.unwrap_or((0, 0));
+    ctx.selected.set(selected);
+    ctx.scroll_offset.set(scroll);
 }
 
 fn refresh_rows(ctx: &HistoryWindowCtx) {
@@ -659,8 +675,7 @@ fn selected_clip_id(ctx: &HistoryWindowCtx) -> Option<i64> {
 }
 
 fn refilter(hwnd: HWND, ctx: &HistoryWindowCtx) {
-    ctx.selected.set(0);
-    ctx.scroll_offset.set(0);
+    apply_default_view(hwnd, ctx);
     invalidate(hwnd);
 }
 

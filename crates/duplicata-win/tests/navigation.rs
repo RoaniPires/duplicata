@@ -129,3 +129,52 @@ fn zero_or_negative_row_height_never_panics_and_hits_nothing() {
     assert_eq!(row_index_at(10, 0, 0, 10), None);
     assert_eq!(row_index_at(10, -5, 0, 10), None);
 }
+
+mod default_selection_with_pinned {
+    use duplicata_core::list_view::{default_view, visible_rows, ContentTypeFilter};
+    use duplicata_core::ClipListItem;
+    use duplicata_win::navigation::{next_selection_index, NavKey};
+
+    fn text(id: i64, last_activity_ms: u64, pinned: bool) -> ClipListItem {
+        ClipListItem {
+            id,
+            canonical_kind: "unicode_text".to_owned(),
+            preview: Some(format!("item {id}")),
+            thumbnail: None,
+            has_text: true,
+            last_activity_ms,
+            pinned,
+        }
+    }
+
+    fn opened_selection(items: &[ClipListItem]) -> (usize, usize) {
+        let visible = visible_rows(items, "", ContentTypeFilter::All);
+        let (sel, _) = default_view(items, &visible, 8).expect("lista com itens");
+        (sel, visible.len())
+    }
+
+    #[test]
+    fn up_from_the_first_recent_selects_the_last_pinned_and_down_comes_back() {
+        // B A │ D C: abre em D (2); ↑ → A (1); ↓ a partir de A → D (2)
+        let items = [
+            text(2, 2_000, true),
+            text(1, 1_000, true),
+            text(4, 4_000, false),
+            text(3, 3_000, false),
+        ];
+        let (sel, total) = opened_selection(&items);
+        assert_eq!(sel, 2);
+        let up = next_selection_index(sel, total, NavKey::Up, 8);
+        assert_eq!(up, 1);
+        assert_eq!(next_selection_index(up, total, NavKey::Down, 8), 2);
+    }
+
+    #[test]
+    fn home_goes_to_the_first_pinned_even_when_it_opened_on_a_recent() {
+        // A │ D: abre em D (1); Home → A (0)
+        let items = [text(1, 1_000, true), text(4, 4_000, false)];
+        let (sel, total) = opened_selection(&items);
+        assert_eq!(sel, 1);
+        assert_eq!(next_selection_index(sel, total, NavKey::Home, 8), 0);
+    }
+}

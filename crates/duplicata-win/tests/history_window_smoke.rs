@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use duplicata_core::capture::{CanonicalKind, CanonicalSelection};
+use duplicata_core::capture::{CanonicalKind, CanonicalSelection, CapturedFormat};
 use duplicata_core::testsupport::unicode_text_format;
 use duplicata_core::{
     ByteBudgetQueue, CaptureQueue, CaptureRecord, ClipListItem, FakeHistoryRepository,
@@ -1110,7 +1110,8 @@ mod trash {
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetClassNameW, GetClientRect, GetWindowTextW, IsWindowVisible,
         PostMessageW, SendMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HCBT_ACTIVATE, HHOOK,
-        WH_CBT, WM_CHAR, WM_CLOSE, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+        WH_CBT, WM_CHAR, WM_CLOSE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+        WM_MOUSEMOVE,
     };
 
     const LIST_TOP_PX: i32 = 34 + 30; // FILTER_STRIP_PX + SEARCH_BAR_PX (privados)
@@ -1124,6 +1125,8 @@ mod trash {
         /// Liga a falha na leitura da lista (faixa de erro na próxima recarga).
         fail_list: Arc<AtomicBool>,
         get_full_calls: Arc<AtomicUsize>,
+        /// O último `clip_id` que a janela tentou colar.
+        last_get_full: Arc<Mutex<Option<i64>>>,
     }
 
     impl HistoryRepository for SharedRepo {
@@ -1178,10 +1181,11 @@ mod trash {
             }
             self.inner.lock().unwrap().list_for_display(limit)
         }
-        fn get_full(&self, _clip_id: i64) -> Result<Option<StoredClip>, StoreError> {
+        fn get_full(&self, clip_id: i64) -> Result<Option<StoredClip>, StoreError> {
             // Contado e nunca devolvido: colar de verdade mexeria na área de
             // transferência da máquina. Uma chamada aqui é a tentativa de colar.
             self.get_full_calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_get_full.lock().unwrap() = Some(clip_id);
             Ok(None)
         }
         fn count_pinned(&self) -> Result<u32, StoreError> {
@@ -1214,7 +1218,29 @@ mod trash {
     #[derive(Default)]
     struct Setup<'a> {
         pinned: &'a [&'a str],
+        /// Prévias semeadas como imagem (`dib`) em vez de texto.
+        images: &'a [&'a str],
         fail_delete: bool,
+    }
+
+    /// Um item de imagem: a prévia só serve para o teste achar o item.
+    fn image_record(tag: u8, preview: &str) -> CaptureRecord {
+        let mut rec = record(tag, preview);
+        let dib = CapturedFormat {
+            format_id: 8, // CF_DIB
+            format_name: None,
+            bytes: vec![tag; 40],
+        };
+        rec.canonical = CanonicalSelection {
+            format_id: dib.format_id,
+            format_name: None,
+            kind: CanonicalKind::Dib,
+            byte_len: dib.bytes.len() as u64,
+        };
+        rec.total_bytes = dib.bytes.len() as u64;
+        rec.has_text = false;
+        rec.formats = vec![dib];
+        rec
     }
 
     struct Fixture {
@@ -1223,6 +1249,7 @@ mod trash {
         worker: Option<JoinHandle<()>>,
         repo: Arc<Mutex<FakeHistoryRepository>>,
         get_full_calls: Arc<AtomicUsize>,
+        last_get_full: Arc<Mutex<Option<i64>>>,
         fail_list: Arc<AtomicBool>,
         /// Id de cada prévia, para os testes falarem em "A", "B", "C".
         ids: Vec<(String, i64)>,
@@ -1239,7 +1266,12 @@ mod trash {
             let mut ids = Vec::new();
             for (i, p) in previews.iter().rev().enumerate() {
                 let tag = (i + 1) as u8;
-                let id = match inner.upsert(&record(tag, p)).expect("semear") {
+                let rec = if setup.images.contains(p) {
+                    image_record(tag, p)
+                } else {
+                    record(tag, p)
+                };
+                let id = match inner.upsert(&rec).expect("semear") {
                     UpsertOutcome::Inserted { clip_id } | UpsertOutcome::Deduped { clip_id } => {
                         clip_id
                     }
@@ -1253,11 +1285,13 @@ mod trash {
             let repo = Arc::new(Mutex::new(inner));
             let get_full_calls = Arc::new(AtomicUsize::new(0));
             let fail_list = Arc::new(AtomicBool::new(false));
+            let last_get_full = Arc::new(Mutex::new(None));
             let shared = SharedRepo {
                 inner: Arc::clone(&repo),
                 fail_delete: setup.fail_delete,
                 fail_list: Arc::clone(&fail_list),
                 get_full_calls: Arc::clone(&get_full_calls),
+                last_get_full: Arc::clone(&last_get_full),
             };
 
             let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
@@ -1292,6 +1326,7 @@ mod trash {
                 worker: Some(worker),
                 repo,
                 get_full_calls,
+                last_get_full,
                 fail_list,
                 ids,
             };
@@ -1367,6 +1402,77 @@ mod trash {
         fn has_update_region(&self) -> bool {
             // SAFETY: `hwnd` válido; `None` só consulta se há região inválida.
             unsafe { GetUpdateRect(self.hwnd(), None, false) }.as_bool()
+        }
+
+        /// O último item que a janela tentou colar.
+        fn pasted(&self) -> Option<i64> {
+            *self.last_get_full.lock().unwrap()
+        }
+
+        fn key(&self, vk: u16) {
+            self.send(WM_KEYDOWN, vk as usize, 0);
+        }
+
+        fn type_text(&self, text: &str) {
+            for ch in text.chars() {
+                self.send(WM_CHAR, ch as usize, 0);
+            }
+        }
+
+        /// Linhas que a lista mostra por página. Repete a conta de
+        /// `visible_row_count` (privada em `history_window.rs`): a área da
+        /// lista vai de `LIST_TOP_PX` (faixa de tipo + busca) até a faixa de
+        /// dicas (`HINT_STRIP_PX`), em linhas inteiras de `ROW_HEIGHT_PX`, no
+        /// mínimo uma. Se a produção mudar essa conta, mude aqui também.
+        fn rows_per_page(&self) -> usize {
+            use duplicata_core::hint_strip::HINT_STRIP_PX;
+            let mut c = RECT::default();
+            // SAFETY: `hwnd` válido.
+            unsafe {
+                let _ = GetClientRect(self.hwnd(), &mut c);
+            }
+            (((c.bottom - c.top - LIST_TOP_PX - HINT_STRIP_PX).max(0)) / ROW_HEIGHT_PX).max(1)
+                as usize
+        }
+
+        /// Copia de novo, fora do app, o conteúdo semeado como `preview`: o
+        /// dedupe sobe a recência dele acima de todas as outras.
+        fn recopy(&self, preview: &str) {
+            // `with` semeia do mais antigo ao mais recente: a etiqueta (e a
+            // identidade) de cada prévia é a posição dela em `ids` mais um.
+            let pos = self
+                .ids
+                .iter()
+                .position(|(p, _)| p == preview)
+                .expect("semeado");
+            let tag = u8::try_from(pos + 1).expect("etiqueta cabe em u8");
+            let mut rec = record(tag, preview);
+            rec.captured_at = Timestamp::from_millis(10_000);
+            let outcome = self.repo.lock().unwrap().upsert(&rec).expect("recopiar");
+            assert_eq!(
+                outcome,
+                UpsertOutcome::Deduped {
+                    clip_id: self.id(preview)
+                },
+                "a recópia cai no mesmo item"
+            );
+        }
+
+        /// Esconde a janela e a reabre pelo atalho. O atalho logo depois de
+        /// esconder é ignorado de propósito (debounce no relógio real), então
+        /// repete até ela abrir, com prazo.
+        fn reopen(&self) {
+            self.send(WM_HOTKEY, 1, 0);
+            assert!(!self.visible(), "o atalho esconde o histórico aberto");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !self.visible() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "o histórico não reabriu"
+                );
+                std::thread::yield_now();
+                self.send(WM_HOTKEY, 1, 0);
+            }
         }
 
         fn paint_now(&self) {
@@ -1812,5 +1918,258 @@ mod trash {
 
         f.send(WM_MOUSELEAVE, 0, 0);
         assert!(!f.has_update_region(), "saída repetida não repinta");
+    }
+
+    mod default_selection {
+        use super::*;
+
+        const VK_RETURN: u16 = 0x0D;
+        const VK_HOME: u16 = 0x24;
+        const VK_UP: u16 = 0x26;
+        const VK_TAB: u16 = 0x09;
+        const VK_RIGHT: u16 = 0x27;
+
+        /// A(texto, fixado) │ D(imagem) C(texto).
+        fn pinned_text_recent_image() -> Fixture {
+            Fixture::with(
+                &["D", "C", "A"],
+                Setup {
+                    pinned: &["A"],
+                    images: &["D"],
+                    ..Setup::default()
+                },
+            )
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; pinta a janela de verdade"]
+        fn clicking_the_text_segment_selects_the_most_recent_text() {
+            let f = pinned_text_recent_image();
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "D", "C"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+            // As caixas dos segmentos só existem depois da primeira pintura.
+            // Varre a faixa da esquerda para a direita: o primeiro clique que
+            // muda a lista é o do segmento logo depois de "Tudo", o "Texto".
+            f.paint_now();
+            let all = f.window.visible_clip_ids();
+            let y = 34 / 2; // meio da faixa de tipo (FILTER_STRIP_PX, privado)
+            let changed = (0..f.width()).any(|x| {
+                f.click(point(x, y));
+                f.window.visible_clip_ids() != all
+            });
+            assert!(changed, "nenhum segmento mudou a lista");
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "C"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn tab_then_right_to_text_selects_the_most_recent_text() {
+            let f = pinned_text_recent_image();
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+            f.key(VK_TAB);
+            f.key(VK_RIGHT);
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "C"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+        }
+
+        /// Recência crescente A < B < C < D; `previews` do mais recente ao
+        /// mais antigo, como em `Fixture::new`.
+        fn open(previews: &[&str], pinned: &[&str]) -> Fixture {
+            Fixture::with(
+                previews,
+                Setup {
+                    pinned,
+                    ..Setup::default()
+                },
+            )
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn opens_on_the_most_recent_copy_below_an_older_pinned() {
+            let f = open(&["D", "C", "B", "A"], &["A"]);
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "D", "C", "B"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn opens_on_the_pinned_when_it_is_the_most_recent_copy() {
+            let f = open(&["D", "C", "B", "A"], &["D"]);
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["D", "C", "B", "A"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn up_from_the_opened_recent_selects_the_last_pinned() {
+            let f = open(&["D", "C", "B", "A"], &["B", "A"]);
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["B", "A", "D", "C"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+            f.key(VK_UP);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn home_from_the_opened_recent_selects_the_first_pinned() {
+            let f = open(&["D", "A"], &["A"]);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+            f.key(VK_HOME);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn only_pinned_opens_on_the_most_recent_pinned() {
+            let f = open(&["B", "A"], &["B", "A"]);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("B")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn a_click_on_the_pinned_then_enter_pastes_the_pinned() {
+            let f = open(&["D", "C", "B", "A"], &["A"]);
+            f.click(f.text(0));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+            f.key(VK_RETURN);
+            assert_eq!(f.pasted(), Some(f.id("A")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn enter_right_after_opening_pastes_the_most_recent_copy() {
+            let f = open(&["D", "C", "B", "A"], &["A"]);
+            f.key(VK_RETURN);
+            assert_eq!(f.pasted(), Some(f.id("D")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn recopying_the_pinned_outside_the_app_selects_it_on_the_next_opening() {
+            let f = open(&["D", "C", "A"], &["A"]);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+            f.recopy("A");
+            f.reopen();
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "D", "C"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn many_pinned_scroll_just_enough_for_the_selected_to_be_the_last_visible_row() {
+            // 24 fixados (o teto da Fixture é 25) passam da página em qualquer
+            // escala; R é a cópia mais recente e vem depois de todos.
+            let pinned_names: Vec<String> = (1..=24).rev().map(|n| format!("F{n:02}")).collect();
+            let mut previews: Vec<&str> = vec!["R"];
+            previews.extend(pinned_names.iter().map(String::as_str));
+            let pinned: Vec<&str> = pinned_names.iter().map(String::as_str).collect();
+            let f = open(&previews, &pinned);
+
+            let total = previews.len();
+            let page = f.rows_per_page();
+            assert!(
+                page < total,
+                "a página ({page}) precisa ser menor que a lista"
+            );
+            let visible = f.window.visible_clip_ids();
+            assert_eq!(visible[total - 1], f.id("R"), "R vem depois dos fixados");
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("R")));
+
+            // R é a última linha desenhada: a rolagem é total - page.
+            f.click(f.text(page - 1));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("R")));
+            f.click(f.text(0));
+            assert_eq!(f.window.selected_clip_id(), Some(visible[total - page]));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn an_empty_history_opens_without_selection() {
+            let f = Fixture::new(&[]);
+            assert_eq!(f.window.selected_clip_id(), None);
+            assert_eq!(
+                f.window.list_display_state(),
+                ListDisplayState::EmptyHistory
+            );
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn typing_the_filter_selects_the_most_recent_match() {
+            let f = open(&["relatório", "senha banco", "senha wifi"], &["senha wifi"]);
+            f.type_text("senha");
+            assert_eq!(
+                f.window.visible_clip_ids(),
+                f.ids_of(&["senha wifi", "senha banco"])
+            );
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("senha banco")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn clearing_the_filter_with_backspace_selects_the_most_recent_copy() {
+            let f = open(&["relatório", "senha banco", "senha wifi"], &["senha wifi"]);
+            f.type_text("senha");
+            f.click(f.text(0));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("senha wifi")));
+            for _ in "senha".chars() {
+                f.send(WM_CHAR, 0x08, 0);
+            }
+            assert_eq!(f.window.visible_clip_ids().len(), 3);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("relatório")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn a_filter_without_matches_has_no_selection() {
+            let f = open(&["D", "C", "A"], &["A"]);
+            f.type_text("zzz");
+            assert_eq!(f.window.selected_clip_id(), None);
+            assert_eq!(f.window.list_display_state(), ListDisplayState::NoMatch);
+        }
+
+        const VK_ESCAPE: u16 = 0x1B;
+
+        /// Filtro "senha" com o fixado selecionado por clique; devolve a
+        /// fixture para a ação que limpa o filtro.
+        fn filtered_with_the_pinned_clicked() -> Fixture {
+            let f = open(&["relatório", "senha banco", "senha wifi"], &["senha wifi"]);
+            f.type_text("senha");
+            f.click(f.text(0));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("senha wifi")));
+            f
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn escape_clearing_the_filter_selects_the_most_recent_copy_and_keeps_the_window() {
+            let f = filtered_with_the_pinned_clicked();
+            f.key(VK_ESCAPE);
+            assert!(f.visible(), "o primeiro Esc só limpa o filtro");
+            assert_eq!(f.window.visible_clip_ids().len(), 3);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("relatório")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn the_delete_char_clearing_the_filter_selects_the_most_recent_copy() {
+            let f = filtered_with_the_pinned_clicked();
+            f.send(WM_CHAR, 0x7F, 0);
+            assert_eq!(f.window.visible_clip_ids().len(), 3);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("relatório")));
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn an_unreadable_history_opens_with_the_error_banner_and_no_selection() {
+            let f = open(&["D", "C", "A"], &["A"]);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("D")));
+            f.fail_list.store(true, Ordering::SeqCst);
+            f.reopen();
+            assert_eq!(f.window.list_display_state(), ListDisplayState::ErrorBanner);
+            assert_eq!(f.window.selected_clip_id(), None);
+        }
     }
 }
