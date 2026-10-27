@@ -15,6 +15,7 @@ use duplicata_core::filter_strip::{
 use duplicata_core::hint_strip;
 use duplicata_core::hover_preview::{self, HoverTracker};
 use duplicata_core::list_view::{self, ContentTypeFilter};
+use duplicata_core::pin_button::{self, PinTone};
 use duplicata_core::row_layout;
 use duplicata_core::theme;
 use duplicata_core::translucency;
@@ -1029,34 +1030,6 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
             delete_button::shows_delete_button(pos, selected, hot.map(|(p, _)| p)),
         );
 
-        if item.pinned {
-            let stripe = win_rect(&layout.pin_stripe);
-            // SAFETY: `dc` válido; `stripe` dentro de `row_rect`.
-            unsafe {
-                fill_solid(
-                    dc,
-                    &stripe,
-                    if is_selected {
-                        colors.selection_fg
-                    } else {
-                        colors.accent
-                    },
-                );
-            }
-            sink.opaque(&stripe);
-        }
-
-        sink.text(
-            win_rect(&layout.type_badge),
-            row_layout::badge_of(&item.canonical_kind).label(),
-            if is_selected {
-                colors.selection_fg
-            } else {
-                colors.text_dim
-            },
-            DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
-        );
-
         if let Some((hbitmap, bw, bh)) = thumb {
             let t = layout.thumbnail;
             if t.right > t.left && t.bottom > t.top {
@@ -1099,27 +1072,40 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
         );
 
+        // O alfinete vem antes da lixeira, e só na parte que a zona da
+        // lixeira não cobre (vazia numa linha estreita demais): o que se vê
+        // bate com o que o clique faz.
+        let pin_area = layout.pin_button;
+        if pin_area.right > pin_area.left
+            && pin_button::shows_pin_button(pos, selected, hot.map(|(p, _)| p), item.pinned)
+        {
+            let button = win_rect(&pin_area);
+            if hot == Some((pos, RowZone::PinButton)) {
+                paint_button_hover(dc, &mut sink, &button, is_selected, &colors);
+            }
+            let glyph = match pin_button::pin_tone(item.pinned, is_selected) {
+                PinTone::Accent => colors.accent,
+                PinTone::Dim => colors.text_dim,
+                PinTone::SelectionFg => colors.selection_fg,
+            };
+            sink.text_in(
+                button,
+                pin_button::pin_glyph(item.pinned).encode_utf8(&mut [0; 4]),
+                glyph,
+                DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                Some(ctx.icon_font.get()),
+            );
+        }
+
         if let Some(button) = layout.delete_button {
             let button = win_rect(&button);
-            let (base, fg, glyph) = if is_selected {
-                (
-                    colors.selection_bg,
-                    colors.selection_fg,
-                    colors.selection_fg,
-                )
+            let glyph = if is_selected {
+                colors.selection_fg
             } else {
-                (colors.surface, colors.text_primary, colors.text_dim)
+                colors.text_dim
             };
             if hot == Some((pos, RowZone::DeleteButton)) {
-                let fill = system_appearance::from_core(theme::subtle_hover_fill(
-                    system_appearance::to_core(base),
-                    system_appearance::to_core(fg),
-                ));
-                // SAFETY: `dc` válido; `button` dentro de `row_rect`.
-                unsafe {
-                    fill_solid(dc, &button, fill);
-                }
-                sink.opaque(&button);
+                paint_button_hover(dc, &mut sink, &button, is_selected, &colors);
             }
             sink.text_in(
                 button,
@@ -1153,6 +1139,31 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
     finish_paint(
         hwnd, hdc, dc, &ps, old_font, hbp, theme, banner, &client, &mut sink,
     );
+}
+
+/// Fundo de destaque de um botão da linha (lixeira ou alfinete) sob o mouse,
+/// calculado sobre o fundo e o texto da linha.
+fn paint_button_hover(
+    dc: HDC,
+    sink: &mut PaintSink,
+    button: &RECT,
+    is_selected: bool,
+    colors: &PaintColors,
+) {
+    let (base, fg) = if is_selected {
+        (colors.selection_bg, colors.selection_fg)
+    } else {
+        (colors.surface, colors.text_primary)
+    };
+    let fill = system_appearance::from_core(theme::subtle_hover_fill(
+        system_appearance::to_core(base),
+        system_appearance::to_core(fg),
+    ));
+    // SAFETY: `dc` válido; `button` dentro da linha que está sendo pintada.
+    unsafe {
+        fill_solid(dc, button, fill);
+    }
+    sink.opaque(button);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1797,7 +1808,8 @@ fn hot_target(hwnd: HWND, ctx: &HistoryWindowCtx) -> Option<(usize, RowZone)> {
 }
 
 /// Posição visível da linha sob o ponto para a pré-visualização: nenhuma
-/// sobre a lixeira, onde ela não abre e, se aberta, some.
+/// sobre os botões da linha (lixeira e alfinete), onde ela não abre e, se
+/// aberta, some.
 fn hover_row_at(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) -> Option<usize> {
     row_hit(hwnd, ctx, click_x(lparam), click_y(lparam))
         .filter(|h| h.zone == RowZone::Body)
@@ -1992,10 +2004,17 @@ fn handle_single_click(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     let mut guard = ctx.click_guard.get();
     let action = guard.on_down(hit.map_or(RowZone::Body, |h| h.zone));
     ctx.click_guard.set(guard);
-    if let (DownAction::Delete, Some(h)) = (action, hit) {
-        // A lixeira não mexe na seleção nem no foco da faixa de filtro.
-        delete_one(hwnd, ctx, h.row_idx);
-        return;
+    // Os botões da linha não mexem na seleção nem no foco da faixa de filtro.
+    match (action, hit) {
+        (DownAction::Delete, Some(h)) => {
+            delete_one(hwnd, ctx, h.row_idx);
+            return;
+        }
+        (DownAction::TogglePin, Some(h)) => {
+            toggle_pin_from_icon(hwnd, ctx, h.row_idx);
+            return;
+        }
+        _ => {}
     }
     match list_click_target(hwnd, ctx, lparam) {
         ListClick::Segment(seg) => {
@@ -2104,14 +2123,19 @@ fn handle_double_click(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     let action = guard.on_double_click(hit.map_or(RowZone::Body, |h| h.zone));
     ctx.click_guard.set(guard);
     match (action, hit) {
-        // O segundo clique de um duplo clique na lixeira: a linha embaixo já
-        // é outro item, que ninguém escolheu.
+        // O segundo clique de um duplo clique num botão da linha: a linha
+        // embaixo pode já ser outro item, que ninguém escolheu.
         (DoubleClickAction::Ignore, _) => return,
         (DoubleClickAction::Delete, Some(h)) => {
             delete_one(hwnd, ctx, h.row_idx);
             return;
         }
-        (DoubleClickAction::Delete, None) | (DoubleClickAction::Paste, _) => {}
+        (DoubleClickAction::TogglePin, Some(h)) => {
+            toggle_pin_from_icon(hwnd, ctx, h.row_idx);
+            return;
+        }
+        (DoubleClickAction::Delete | DoubleClickAction::TogglePin, None)
+        | (DoubleClickAction::Paste, _) => {}
     }
     if let ListClick::Row { row_idx, .. } = list_click_target(hwnd, ctx, lparam) {
         let clip_id = ctx.rows.borrow().get(row_idx).map(|r| r.id);
@@ -2191,15 +2215,34 @@ fn handle_context_menu(hwnd: HWND, ctx: &HistoryWindowCtx, lparam: LPARAM) {
     };
 
     match (chosen, row) {
-        (MENU_ID_PIN, Some(idx)) => toggle_pin(hwnd, ctx, idx, true),
-        (MENU_ID_UNPIN, Some(idx)) => toggle_pin(hwnd, ctx, idx, false),
+        (MENU_ID_PIN, Some(idx)) => toggle_pin(hwnd, ctx, idx, true, AfterPin::FollowToggled),
+        (MENU_ID_UNPIN, Some(idx)) => toggle_pin(hwnd, ctx, idx, false, AfterPin::FollowToggled),
         (MENU_ID_DELETE_ONE, Some(idx)) => delete_one(hwnd, ctx, idx),
         (MENU_ID_DELETE_ALL, _) => trigger_delete_all(hwnd, ctx),
         _ => {}
     }
 }
 
-fn toggle_pin(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize, pin: bool) {
+/// Para onde vai a seleção depois de fixar ou desafixar com sucesso.
+#[derive(Clone, Copy)]
+enum AfterPin {
+    /// Menu e Ctrl+P: a seleção vai junto com o item alternado.
+    FollowToggled,
+    /// Alfinete da linha: a seleção fica no item que já estava selecionado.
+    KeepSelected(Option<i64>),
+}
+
+/// Alterna o fixado do item da linha `idx` pelo alfinete: não seleciona a
+/// linha clicada; a seleção segue o item que já estava selecionado.
+fn toggle_pin_from_icon(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize) {
+    let Some(pinned_now) = ctx.rows.borrow().get(idx).map(|r| r.pinned) else {
+        return;
+    };
+    let keep = AfterPin::KeepSelected(selected_clip_id(ctx));
+    toggle_pin(hwnd, ctx, idx, !pinned_now, keep);
+}
+
+fn toggle_pin(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize, pin: bool, after: AfterPin) {
     let Some(clip_id) = ctx.rows.borrow().get(idx).map(|r| r.id) else {
         return;
     };
@@ -2223,7 +2266,11 @@ fn toggle_pin(hwnd: HWND, ctx: &HistoryWindowCtx, idx: usize, pin: bool) {
                 Level::DEBUG,
                 LogFields::new(if pin { "clip_pinned" } else { "clip_unpinned" }).clip_id(clip_id)
             );
-            select_clip(hwnd, ctx, clip_id);
+            match after {
+                AfterPin::FollowToggled => select_clip(hwnd, ctx, clip_id),
+                AfterPin::KeepSelected(Some(kept)) => select_clip(hwnd, ctx, kept),
+                AfterPin::KeepSelected(None) => invalidate(hwnd),
+            }
         }
         Ok(Ok(SetPinnedOutcome::PinCapReached { limit, current })) => {
             show_pin_cap_message(hwnd, limit, current);
@@ -2332,7 +2379,7 @@ fn toggle_pin_selected(hwnd: HWND, ctx: &HistoryWindowCtx) {
     let Some(pinned_now) = ctx.rows.borrow().get(row_idx).map(|r| r.pinned) else {
         return;
     };
-    toggle_pin(hwnd, ctx, row_idx, !pinned_now);
+    toggle_pin(hwnd, ctx, row_idx, !pinned_now, AfterPin::FollowToggled);
 }
 
 fn show_pin_cap_message(owner: HWND, limit: u32, current: u32) {
@@ -2594,9 +2641,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
 #[cfg(test)]
 mod tests {
-    use super::{row_label, wheel_notches, ROW_HEIGHT_PX, WINDOW_WIDTH};
+    use super::{pin_button, row_label, wheel_notches, ROW_HEIGHT_PX, WINDOW_WIDTH};
     use duplicata_core::filter_strip::Rect as CoreRect;
-    use duplicata_core::row_layout::{self, RowBadge};
+    use duplicata_core::row_layout;
     use duplicata_core::ClipListItem;
     use windows::Win32::Foundation::WPARAM;
 
@@ -2657,19 +2704,25 @@ mod tests {
             bottom: ROW_HEIGHT_PX,
         };
         let l = row_layout::row_layout(row, 96, None);
-        assert!(l.pin_stripe.right > l.pin_stripe.left);
-        assert!(l.pin_stripe.right <= l.type_badge.left);
+        assert!(l.pin_button.right > l.pin_button.left);
+        assert!(
+            l.pin_button.right < l.text.left,
+            "o alfinete termina antes do texto"
+        );
+
+        // A marca é o alfinete, não o rótulo: longe da seleção (linha 0) e
+        // do mouse, só a linha fixada mostra o ícone, e é o preenchido.
+        let (pos, selected, hot) = (3, 0, None);
+        assert!(pin_button::shows_pin_button(pos, selected, hot, true));
+        assert!(!pin_button::shows_pin_button(pos, selected, hot, false));
+        assert_eq!(pin_button::pin_glyph(true), pin_button::PINNED_GLYPH);
+        assert_ne!(pin_button::pin_glyph(true), pin_button::pin_glyph(false));
     }
 
     #[test]
-    fn the_no_preview_placeholders_carry_no_pin_prefix_and_the_type_is_a_badge() {
+    fn the_no_preview_placeholders_carry_no_pin_prefix() {
         assert_eq!(row_label(&item(None, "dib", true)), "[imagem — sem prévia]");
         assert_eq!(row_label(&item(None, "hdrop", false)), "[arquivos]");
-
-        assert_eq!(row_layout::badge_of("dib"), RowBadge::Image);
-        assert_eq!(row_layout::badge_of("hdrop"), RowBadge::Files);
-        assert_eq!(row_layout::badge_of("unicode_text"), RowBadge::Text);
-        assert_eq!(row_layout::badge_of("custom"), RowBadge::NoPreview);
     }
 
     #[test]

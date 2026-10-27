@@ -41,7 +41,8 @@ Copie normalmente com `Ctrl+C`. Para ver o histórico, aperte **`Ctrl+Shift+V`**
 | `Tab` + `←` `→` | filtra por tipo: tudo, texto, imagem, arquivos |
 | `Esc` | limpa o filtro; sem filtro, fecha |
 
-Clique com o botão direito num item para fixar ou apagar todo o histórico.
+Clique com o botão direito num item para fixar ou apagar todo o histórico, ou
+clique no alfinete à esquerda do item para fixar ou desafixar.
 Clique com o botão direito no ícone da bandeja para abrir as Configurações,
 onde ficam o atalho, os prazos de retenção, a lista de programas ignorados e
 a proteção do banco.

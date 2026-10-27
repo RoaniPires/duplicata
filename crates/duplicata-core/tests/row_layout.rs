@@ -1,10 +1,10 @@
 use duplicata_core::filter_strip::Rect;
 use duplicata_core::hint_strip::HINT_STRIP_PX;
 use duplicata_core::row_layout::{
-    badge_of, client_height_at, delete_button_rect, pin_reserved_px, row_layout,
-    row_layout_with_delete, rows_that_fit, scale_px, thumbnail_target, RowBadge, MIN_VISIBLE_ROWS,
-    ROW_HEIGHT_PX, TEXT_GAP_PX, THUMBNAIL_MARGIN_PX, THUMBNAIL_MAX_WIDTH_PX,
-    WINDOW_FRAME_ALLOWANCE_PX, WINDOW_HEIGHT_PX, WINDOW_WIDTH_PX,
+    client_height_at, delete_button_rect, pin_button_rect, row_layout, row_layout_with_delete,
+    rows_that_fit, scale_px, thumbnail_target, MIN_VISIBLE_ROWS, ROW_HEIGHT_PX, TEXT_GAP_PX,
+    THUMBNAIL_MARGIN_PX, THUMBNAIL_MAX_WIDTH_PX, WINDOW_FRAME_ALLOWANCE_PX, WINDOW_HEIGHT_PX,
+    WINDOW_WIDTH_PX,
 };
 
 fn row_width(dpi: u32) -> i32 {
@@ -23,43 +23,52 @@ fn row(width_px: i32, height_px: i32) -> Rect {
 }
 
 #[test]
-fn the_pin_indicator_column_never_costs_more_than_ten_percent_of_the_row() {
-    for dpi in DPIS {
+fn the_pin_column_never_costs_more_than_ten_percent_of_the_row() {
+    for dpi in ALL_SCALES {
         let width = row_width(dpi);
-        let reserved = pin_reserved_px(dpi);
+        let r = row(width, ROW_HEIGHT_PX);
+        let l = row_layout(r, dpi, None);
+        let reserved = l.pin_button.right - l.pin_button.left;
+        assert!(reserved > 0, "dpi={dpi}: a coluna do alfinete existe");
         assert!(
             reserved * 100 <= width * 10,
-            "dpi={dpi}: indicador de fixado reserva {reserved}px de {width}px \
+            "dpi={dpi}: o alfinete reserva {reserved}px de {width}px \
              de linha (> 10%, FR-030)"
         );
     }
 }
 
 #[test]
-fn a_pinned_row_and_an_unpinned_row_have_the_exact_same_preview_width() {
-    for dpi in DPIS {
-        let r = row(row_width(dpi), ROW_HEIGHT_PX);
-        let l = row_layout(r, dpi, None);
-        assert_eq!(
-            l.text.right - l.text.left,
-            row_layout(r, dpi, None).text.right - row_layout(r, dpi, None).text.left
-        );
-        assert!(l.text.left > l.pin_stripe.right, "dpi={dpi}");
+fn the_pin_button_is_a_square_as_tall_as_the_row_hugging_the_left_edge() {
+    for dpi in ALL_SCALES {
+        let r = Rect {
+            left: 4,
+            top: 56,
+            right: 4 + row_width(dpi),
+            bottom: 56 + ROW_HEIGHT_PX,
+        };
+        let b = pin_button_rect(r, dpi);
+        assert_eq!(b.left, r.left, "dpi={dpi}: encostado na borda esquerda");
+        assert_eq!(b.right - b.left, ROW_HEIGHT_PX, "dpi={dpi}: quadrado");
+        assert_eq!(b.top, r.top, "dpi={dpi}");
+        assert_eq!(b.bottom, r.bottom, "dpi={dpi}");
+        for show_delete in [false, true] {
+            let l = row_layout_with_delete(r, dpi, Some((128, 72)), show_delete);
+            assert_eq!(l.pin_button, b, "dpi={dpi} lixeira={show_delete}");
+        }
     }
 }
 
 #[test]
-fn the_pin_stripe_hugs_the_left_edge_and_stays_inside_the_row() {
-    for dpi in DPIS {
-        let r = row(row_width(dpi), ROW_HEIGHT_PX);
-        let l = row_layout(r, dpi, None);
-        assert_eq!(l.pin_stripe.left, r.left, "dpi={dpi}");
-        assert!(l.pin_stripe.right > l.pin_stripe.left, "dpi={dpi}");
-        assert!(
-            l.pin_stripe.top >= r.top && l.pin_stripe.bottom <= r.bottom,
-            "dpi={dpi}"
-        );
-    }
+fn a_row_narrower_than_its_height_cuts_the_pin_button_at_the_right_edge() {
+    let r = Rect {
+        left: 10,
+        top: 0,
+        right: 20,
+        bottom: ROW_HEIGHT_PX,
+    };
+    let b = pin_button_rect(r, 96);
+    assert_eq!((b.left, b.right), (10, 20));
 }
 
 #[test]
@@ -141,9 +150,69 @@ fn a_degenerate_source_leaves_the_row_laid_out_as_if_there_were_no_thumbnail() {
 fn a_row_with_no_height_still_produces_a_sane_layout() {
     let r = row(row_width(96), 0);
     let l = row_layout(r, 96, Some((128, 72)));
-    assert!(l.pin_stripe.bottom >= l.pin_stripe.top);
-    assert!(l.type_badge.right > l.type_badge.left);
+    assert!(l.pin_button.left <= l.pin_button.right);
+    assert!(l.pin_button.top <= l.pin_button.bottom);
+    assert!(l.pin_button.right <= l.text.left);
     assert!(l.text.left <= l.text.right);
+}
+
+#[test]
+fn a_row_with_negative_height_gets_an_empty_pin_button_at_its_left_edge() {
+    let r = Rect {
+        left: 0,
+        top: 50,
+        right: 300,
+        bottom: 20,
+    };
+    let p = pin_button_rect(r, 96);
+    assert_eq!((p.left, p.right), (0, 0), "sem largura, nunca negativa");
+    let l = row_layout(r, 96, None);
+    assert_eq!(l.pin_button.right, l.pin_button.left);
+    assert!(l.pin_button.right <= l.text.left);
+}
+
+#[test]
+fn a_row_narrower_than_two_buttons_leaves_the_pin_only_what_the_trash_does_not_cover() {
+    // A zona da lixeira ganha o clique onde os quadrados se sobrepõem (com
+    // ou sem a lixeira à mostra): o alfinete desenhado para antes dela.
+    let r = row(40, ROW_HEIGHT_PX);
+    let trash = delete_button_rect(r, 96);
+    for show_delete in [false, true] {
+        let l = row_layout_with_delete(r, 96, None, show_delete);
+        assert_eq!(l.pin_button.left, r.left, "lixeira={show_delete}");
+        assert_eq!(l.pin_button.right, trash.left, "lixeira={show_delete}");
+    }
+    let tiny = row(20, ROW_HEIGHT_PX);
+    let l = row_layout(tiny, 96, None);
+    assert_eq!(
+        l.pin_button.right, l.pin_button.left,
+        "a lixeira cobre a linha toda: alfinete vazio"
+    );
+}
+
+#[test]
+fn a_row_with_inverted_edges_gets_an_empty_pin_button_at_its_left_edge() {
+    let r = Rect {
+        left: 100,
+        top: 0,
+        right: 50,
+        bottom: ROW_HEIGHT_PX,
+    };
+    let p = pin_button_rect(r, 96);
+    assert_eq!(
+        (p.left, p.right),
+        (100, 100),
+        "nunca termina antes de começar"
+    );
+    for show_delete in [false, true] {
+        let l = row_layout_with_delete(r, 96, None, show_delete);
+        assert_eq!(
+            (l.pin_button.left, l.pin_button.right),
+            (100, 100),
+            "layout com lixeira={show_delete}"
+        );
+        assert!(l.text.left <= l.text.right, "lixeira={show_delete}");
+    }
 }
 
 #[test]
@@ -180,14 +249,11 @@ fn the_columns_run_left_to_right_without_overlapping() {
         let r = row(row_width(dpi), ROW_HEIGHT_PX);
         for thumb in [None, Some((128u32, 72u32))] {
             let l = row_layout(r, dpi, thumb);
-            assert!(
-                l.pin_stripe.right <= l.type_badge.left,
-                "dpi={dpi} {thumb:?}"
-            );
-            assert!(l.type_badge.right <= l.text.left, "dpi={dpi} {thumb:?}");
+            assert!(l.pin_button.right > l.pin_button.left, "dpi={dpi}");
+            assert!(l.pin_button.right <= l.text.left, "dpi={dpi} {thumb:?}");
             assert!(l.text.left <= l.text.right, "dpi={dpi} {thumb:?}");
             if thumb.is_some() {
-                assert!(l.type_badge.right <= l.thumbnail.left, "dpi={dpi}");
+                assert!(l.pin_button.right <= l.thumbnail.left, "dpi={dpi}");
                 assert!(l.thumbnail.right <= l.text.left, "dpi={dpi}");
             }
         }
@@ -203,39 +269,21 @@ fn a_row_with_a_thumbnail_leaves_less_text_room_than_one_without() {
 }
 
 #[test]
-fn each_kind_gets_its_own_badge() {
-    assert_eq!(badge_of("unicode_text"), RowBadge::Text);
-    assert_eq!(badge_of("dib"), RowBadge::Image);
-    assert_eq!(badge_of("dibv5"), RowBadge::Image);
-    assert_eq!(badge_of("hdrop"), RowBadge::Files);
-    assert_eq!(badge_of("custom"), RowBadge::NoPreview);
-    assert_eq!(badge_of("algo_que_nao_existe"), RowBadge::NoPreview);
-}
-
-#[test]
-fn the_badges_are_distinguishable_from_one_another() {
-    let labels = [
-        RowBadge::Text.label(),
-        RowBadge::Image.label(),
-        RowBadge::Files.label(),
-        RowBadge::NoPreview.label(),
-    ];
-    for (i, a) in labels.iter().enumerate() {
-        assert!(!a.is_empty(), "etiqueta vazia não distingue nada");
-        for b in &labels[i + 1..] {
-            assert_ne!(a, b, "duas categorias com a mesma etiqueta");
-        }
-    }
-}
-
-#[test]
-fn the_badge_column_is_reserved_on_every_row_so_the_text_lines_up() {
+fn the_pin_column_is_reserved_on_every_row_so_the_text_lines_up() {
     for dpi in DPIS {
         let r = row(row_width(dpi), ROW_HEIGHT_PX);
         let a = row_layout(r, dpi, None);
         let b = row_layout(r, dpi, Some((128, 72)));
-        assert_eq!(a.type_badge, b.type_badge, "dpi={dpi}");
-        assert!(a.type_badge.right > a.type_badge.left, "dpi={dpi}");
+        let c = row_layout_with_delete(r, dpi, None, true);
+        assert_eq!(a.pin_button, b.pin_button, "dpi={dpi}");
+        assert_eq!(a.pin_button, c.pin_button, "dpi={dpi}");
+        assert!(a.pin_button.right > a.pin_button.left, "dpi={dpi}");
+        assert_eq!(
+            a.text.left,
+            a.pin_button.right + scale_px(TEXT_GAP_PX, dpi),
+            "dpi={dpi}: o texto começa uma fresta depois do alfinete"
+        );
+        assert_eq!(a.text.left, c.text.left, "dpi={dpi}");
     }
 }
 
@@ -365,6 +413,72 @@ fn the_layout_without_the_delete_button_is_exactly_row_layout() {
                 row_layout_with_delete(r, dpi, thumb, false),
                 row_layout(r, dpi, thumb)
             );
+        }
+    }
+}
+
+#[test]
+fn every_point_of_the_drawn_pin_button_clicks_the_pin_and_the_rest_of_its_square_is_the_trash() {
+    use duplicata_core::delete_button::{zone_at, RowZone};
+    for height in -3..=40 {
+        for width in -3..=80 {
+            let r = Rect {
+                left: 7,
+                top: 5,
+                right: 7 + width,
+                bottom: 5 + height,
+            };
+            let square = pin_button_rect(r, 96);
+            for show_delete in [false, true] {
+                let l = row_layout_with_delete(r, 96, None, show_delete);
+                let p = l.pin_button;
+                assert_eq!(p.left, square.left, "{r:?}");
+                assert!(
+                    p.left <= p.right && p.right <= square.right,
+                    "{r:?}: alfinete {p:?} fora do quadrado {square:?}"
+                );
+                for y in (r.top - 1)..=(r.bottom + 1) {
+                    for x in (r.left - 1)..=(r.right + 1) {
+                        let drawn = x >= p.left && x < p.right && y >= p.top && y < p.bottom;
+                        let in_square = x >= square.left
+                            && x < square.right
+                            && y >= square.top
+                            && y < square.bottom;
+                        let zone = zone_at(x, y, r, 96);
+                        if drawn {
+                            assert_eq!(zone, RowZone::PinButton, "{r:?} ({x},{y}) desenhado");
+                        } else if in_square {
+                            assert_eq!(zone, RowZone::DeleteButton, "{r:?} ({x},{y}) coberto");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_pin_button_never_has_negative_width_nor_crosses_the_trash_for_any_row_geometry() {
+    for left in [-20, 0, 7, 100] {
+        for right in [-30, 0, 5, 50, 100, 400] {
+            for (top, bottom) in [(0, 0), (10, 4), (0, 1), (0, 28), (3, 60)] {
+                let r = Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                };
+                let trash_left = delete_button_rect(r, 96).left;
+                for show_delete in [false, true] {
+                    let l = row_layout_with_delete(r, 96, None, show_delete);
+                    let p = l.pin_button;
+                    let ctx = format!("{r:?} lixeira={show_delete}");
+                    assert_eq!(p.left, r.left, "{ctx}");
+                    assert!(p.left <= p.right, "{ctx}");
+                    assert!(p.right <= trash_left.max(r.left), "{ctx}");
+                    assert!(l.text.left <= l.text.right, "{ctx}");
+                }
+            }
         }
     }
 }

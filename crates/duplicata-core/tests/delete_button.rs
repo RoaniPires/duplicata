@@ -2,7 +2,9 @@ use duplicata_core::delete_button::{
     shows_delete_button, zone_at, ClickGuard, DoubleClickAction, DownAction, RowZone,
 };
 use duplicata_core::filter_strip::Rect;
-use duplicata_core::row_layout::{delete_button_rect, scale_px, ROW_HEIGHT_PX, TEXT_GAP_PX};
+use duplicata_core::row_layout::{
+    delete_button_rect, pin_button_rect, scale_px, ROW_HEIGHT_PX, TEXT_GAP_PX,
+};
 
 fn shown(selected: usize, hot: Option<usize>) -> Vec<usize> {
     (0..4)
@@ -87,11 +89,84 @@ fn the_gap_between_text_and_trash_counts_as_the_row_body() {
             "dpi={dpi}"
         );
         assert_eq!(
-            zone_at(r.left + 5, mid_y, r, dpi),
+            zone_at(pin_button_rect(r, dpi).right + 5, mid_y, r, dpi),
             RowZone::Body,
             "dpi={dpi}"
         );
     }
+}
+
+#[test]
+fn the_pin_zone_covers_the_left_square_and_nothing_past_it() {
+    for dpi in DPIS {
+        let r = row_at(dpi);
+        let p = pin_button_rect(r, dpi);
+        let mid_y = (r.top + r.bottom) / 2;
+        assert_eq!(
+            zone_at(p.left, mid_y, r, dpi),
+            RowZone::PinButton,
+            "dpi={dpi}"
+        );
+        assert_eq!(
+            zone_at(p.right - 1, mid_y, r, dpi),
+            RowZone::PinButton,
+            "dpi={dpi}"
+        );
+        assert_eq!(zone_at(p.right, mid_y, r, dpi), RowZone::Body, "dpi={dpi}");
+        assert_eq!(
+            zone_at(p.left - 1, mid_y, r, dpi),
+            RowZone::Body,
+            "dpi={dpi}"
+        );
+        assert_eq!(zone_at(p.left + 2, r.top, r, dpi), RowZone::PinButton);
+        assert_eq!(
+            zone_at(p.left + 2, r.bottom - 1, r, dpi),
+            RowZone::PinButton
+        );
+        assert_eq!(zone_at(p.left + 2, r.top - 1, r, dpi), RowZone::Body);
+        assert_eq!(zone_at(p.left + 2, r.bottom, r, dpi), RowZone::Body);
+    }
+}
+
+#[test]
+fn a_down_on_the_pin_toggles() {
+    let mut g = ClickGuard::default();
+    assert_eq!(g.on_down(RowZone::PinButton), DownAction::TogglePin);
+}
+
+#[test]
+fn a_double_click_on_the_pin_toggles_exactly_once() {
+    // WM_LBUTTONDOWN (alterna), depois WM_LBUTTONDBLCLK no mesmo ponto.
+    let mut g = ClickGuard::default();
+    let mut toggles = 0;
+    if g.on_down(RowZone::PinButton) == DownAction::TogglePin {
+        toggles += 1;
+    }
+    let second = g.on_double_click(RowZone::PinButton);
+    assert_eq!(second, DoubleClickAction::Ignore);
+    assert_eq!(toggles, 1);
+}
+
+#[test]
+fn the_second_click_after_a_pin_down_is_ignored_even_over_the_body() {
+    let mut g = ClickGuard::default();
+    g.on_down(RowZone::PinButton);
+    assert_eq!(g.on_double_click(RowZone::Body), DoubleClickAction::Ignore);
+    g.on_down(RowZone::PinButton);
+    assert_eq!(
+        g.on_double_click(RowZone::DeleteButton),
+        DoubleClickAction::Ignore
+    );
+}
+
+#[test]
+fn a_double_click_landing_on_the_pin_after_a_body_down_toggles() {
+    let mut g = ClickGuard::default();
+    g.on_down(RowZone::Body);
+    assert_eq!(
+        g.on_double_click(RowZone::PinButton),
+        DoubleClickAction::TogglePin
+    );
 }
 
 #[test]

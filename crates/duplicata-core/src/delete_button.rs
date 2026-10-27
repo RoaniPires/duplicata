@@ -1,8 +1,9 @@
-//! Lixeira de um clique na linha do histórico: em quais linhas aparece, onde
-//! fica o clique e como o duplo clique sobre ela vira um único apagar.
+//! Botões de um clique na linha do histórico (lixeira à direita, alfinete à
+//! esquerda): em quais linhas a lixeira aparece, onde fica o clique e como o
+//! duplo clique sobre um botão vira uma única ação.
 
 use crate::filter_strip::Rect;
-use crate::row_layout::delete_button_rect;
+use crate::row_layout::{delete_button_rect, pin_button_rect};
 
 /// Lixeira da fonte de ícones do sistema (Segoe Fluent Icons / MDL2 Assets).
 pub const DELETE_GLYPH: char = '\u{E74D}';
@@ -18,16 +19,24 @@ pub fn shows_delete_button(pos: usize, selected: usize, hot: Option<usize>) -> b
 /// Parte da linha sob um ponto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowZone {
-    /// Qualquer ponto fora da lixeira, inclusive a fresta antes dela.
+    /// Qualquer ponto fora dos botões, inclusive as frestas ao lado deles.
     Body,
     DeleteButton,
+    PinButton,
 }
 
-/// Em que parte da linha `row` cai o ponto (`x`, `y`).
+fn contains(r: Rect, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// Em que parte da linha `row` cai o ponto (`x`, `y`). Numa linha mais
+/// estreita que dois botões, onde os dois quadrados se sobrepõem, a lixeira
+/// ganha.
 pub fn zone_at(x: i32, y: i32, row: Rect, dpi: u32) -> RowZone {
-    let b = delete_button_rect(row, dpi);
-    if x >= b.left && x < b.right && y >= b.top && y < b.bottom {
+    if contains(delete_button_rect(row, dpi), x, y) {
         RowZone::DeleteButton
+    } else if contains(pin_button_rect(row, dpi), x, y) {
+        RowZone::PinButton
     } else {
         RowZone::Body
     }
@@ -38,6 +47,7 @@ pub fn zone_at(x: i32, y: i32, row: Rect, dpi: u32) -> RowZone {
 pub enum DownAction {
     Select,
     Delete,
+    TogglePin,
 }
 
 /// O que fazer com o duplo clique sobre a linha.
@@ -45,34 +55,39 @@ pub enum DownAction {
 pub enum DoubleClickAction {
     Paste,
     Delete,
+    TogglePin,
     Ignore,
 }
 
 /// Lembra onde caiu o último clique, para o segundo clique de um duplo
-/// clique na lixeira não colar nem apagar o item que subiu para o lugar.
+/// clique num botão (lixeira ou alfinete) não colar, apagar nem alternar o
+/// item que subiu para o lugar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClickGuard {
     last_down_on_button: bool,
 }
 
 impl ClickGuard {
-    /// Botão esquerdo desceu: na lixeira apaga, no corpo seleciona.
+    /// Botão esquerdo desceu: na lixeira apaga, no alfinete alterna o
+    /// fixado, no corpo seleciona.
     pub fn on_down(&mut self, zone: RowZone) -> DownAction {
-        self.last_down_on_button = zone == RowZone::DeleteButton;
+        self.last_down_on_button = zone != RowZone::Body;
         match zone {
             RowZone::DeleteButton => DownAction::Delete,
+            RowZone::PinButton => DownAction::TogglePin,
             RowZone::Body => DownAction::Select,
         }
     }
 
     /// Duplo clique: o segundo clique de um duplo clique cuja primeira metade
-    /// caiu na lixeira não faz nada (a linha sob ele já é outro item).
+    /// caiu num botão não faz nada (a linha sob ele pode já ser outro item).
     pub fn on_double_click(&mut self, zone: RowZone) -> DoubleClickAction {
         if std::mem::take(&mut self.last_down_on_button) {
             return DoubleClickAction::Ignore;
         }
         match zone {
             RowZone::DeleteButton => DoubleClickAction::Delete,
+            RowZone::PinButton => DoubleClickAction::TogglePin,
             RowZone::Body => DoubleClickAction::Paste,
         }
     }

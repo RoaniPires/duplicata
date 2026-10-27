@@ -334,8 +334,8 @@ fn image_row(id: i64, w: u32, h: u32, pinned: bool) -> ClipListItem {
 
 #[test]
 #[ignore = "precisa de sessão gráfica; julgamento visual é manual (quickstart.md §6)"]
-fn rows_show_a_proportional_thumbnail_a_type_badge_and_a_visual_pin_marker() {
-    use duplicata_core::row_layout::{self, RowBadge};
+fn rows_show_a_proportional_thumbnail_and_paint_without_panicking_with_a_pinned_row() {
+    use duplicata_core::row_layout;
     use duplicata_win::thumbnail_gdi::ThumbnailCache;
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_HOTKEY};
@@ -376,10 +376,12 @@ fn rows_show_a_proportional_thumbnail_a_type_badge_and_a_visual_pin_marker() {
     .expect("criar a janela");
 
     // Abre e pinta de verdade — se a pintura panicasse (decode, StretchBlt,
-    // HALFTONE), seria aqui.
+    // HALFTONE, glifo do alfinete na linha fixada e na selecionada), seria
+    // aqui. `UpdateWindow` força o `WM_PAINT` agora, sem laço de mensagens.
     // SAFETY: `hwnd` recém-criada nesta thread.
     unsafe {
         SendMessageW(window.hwnd(), WM_HOTKEY, Some(WPARAM(1)), Some(LPARAM(0)));
+        let _ = windows::Win32::Graphics::Gdi::UpdateWindow(window.hwnd());
     }
 
     let mut cache = ThumbnailCache::new();
@@ -408,10 +410,6 @@ fn rows_show_a_proportional_thumbnail_a_type_badge_and_a_visual_pin_marker() {
             item.id
         );
     }
-
-    assert_eq!(row_layout::badge_of("dib"), RowBadge::Image);
-    assert_eq!(row_layout::badge_of("unicode_text"), RowBadge::Text);
-    assert_eq!(row_layout::badge_of("hdrop"), RowBadge::Files);
 
     println!(
         "5 linhas pintadas (paisagem fixada, retrato, panorâmica, texto, arquivos); \
@@ -831,7 +829,7 @@ fn mouse_wheel_scrolls_the_list_without_moving_the_selection() {
     // Clicar no topo da área de lista agora tem de acertar o item que ficou
     // visível ali depois da rolagem (offset 6 → clip TOTAL - 6), provando que
     // `ctx.scroll_offset` avançou o número certo de linhas.
-    let click_lparam = LPARAM(((LIST_TOP_PX as u32) << 16) as isize);
+    let click_lparam = LPARAM((((LIST_TOP_PX as u32) << 16) | 80) as isize);
     // SAFETY: idem.
     unsafe {
         SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(0)), Some(click_lparam));
@@ -1221,6 +1219,8 @@ mod trash {
         /// Prévias semeadas como imagem (`dib`) em vez de texto.
         images: &'a [&'a str],
         fail_delete: bool,
+        /// Teto de fixados do worker; `None` deixa o padrão da configuração.
+        max_pinned: Option<u32>,
     }
 
     /// Um item de imagem: a prévia só serve para o teste achar o item.
@@ -1297,13 +1297,17 @@ mod trash {
             let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
             let worker_queue = Arc::clone(&queue);
             let mut worker_repo = shared.clone();
+            let mut config = Config::with_paths("db".into(), "logs".into());
+            if let Some(max) = setup.max_pinned {
+                config.max_pinned = max;
+            }
             let worker = thread::spawn(move || {
                 let counters = WorkerCounters::default();
                 let (heuristic_tx, _heuristic_rx) = std::sync::mpsc::channel();
                 run_worker(
                     worker_queue.as_ref(),
                     &mut worker_repo,
-                    &Config::with_paths("db".into(), "logs".into()),
+                    &config,
                     &counters,
                     &heuristic_tx,
                 );
@@ -1384,6 +1388,25 @@ mod trash {
 
         fn text(&self, row: usize) -> isize {
             point(80, self.row_y(row))
+        }
+
+        /// Centro do alfinete da linha `row` (lado = altura da linha, na
+        /// borda esquerda).
+        fn pin(&self, row: usize) -> isize {
+            point(ROW_HEIGHT_PX / 2, self.row_y(row))
+        }
+
+        /// Ids gravados como fixados, do mais recente ao mais antigo.
+        fn pinned_ids(&self) -> Vec<i64> {
+            self.repo
+                .lock()
+                .unwrap()
+                .list_for_display(1000)
+                .expect("listar")
+                .into_iter()
+                .filter(|i| i.pinned)
+                .map(|i| i.id)
+                .collect()
         }
 
         /// Um pixel à esquerda da lixeira: a fresta entre o texto e ela.
@@ -1918,6 +1941,256 @@ mod trash {
 
         f.send(WM_MOUSELEAVE, 0, 0);
         assert!(!f.has_update_region(), "saída repetida não repinta");
+    }
+
+    mod pin_icon {
+        use super::*;
+
+        const VK_TAB: u16 = 0x09;
+        const VK_RIGHT: u16 = 0x27;
+
+        fn sorted(mut ids: Vec<i64>) -> Vec<i64> {
+            ids.sort_unstable();
+            ids
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn the_pin_of_another_row_pins_it_and_the_selection_stays_on_its_item() {
+            // Aceite 4: A, B, C não fixados; seleção em A; ícone de C.
+            let f = Fixture::new(&["A", "B", "C"]);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+            f.click(f.pin(2));
+            assert_eq!(f.pinned_ids(), f.ids_of(&["C"]), "C gravado como fixado");
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["C", "A", "B"]));
+            assert_eq!(f.window.pinned_boundary(), Some(1), "C no grupo do topo");
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+            assert!(f.visible(), "a janela continua aberta");
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0, "nada colado");
+            f.paint_now();
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn the_pin_of_the_selected_row_pins_it_and_keeps_it_selected() {
+            // Aceite 5.
+            let f = Fixture::new(&["A", "B", "C"]);
+            f.click(f.text(2));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+            f.click(f.pin(2));
+            assert_eq!(f.pinned_ids(), f.ids_of(&["C"]));
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["C", "A", "B"]));
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("C")));
+            assert!(f.visible());
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn the_pin_of_a_pinned_row_unpins_it_back_to_its_date_position() {
+            // Aceite 6.
+            let f = Fixture::with(
+                &["A", "B", "C"],
+                Setup {
+                    pinned: &["C"],
+                    ..Setup::default()
+                },
+            );
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["C", "A", "B"]));
+            let selected = f.window.selected_clip_id();
+            f.click(f.pin(0));
+            assert!(f.pinned_ids().is_empty(), "C deixou de ser fixado");
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "B", "C"]));
+            assert_eq!(f.window.pinned_boundary(), None);
+            assert_eq!(f.window.selected_clip_id(), selected, "seleção intacta");
+            assert!(f.visible());
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0);
+            f.paint_now();
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; o aviso modal é fechado por um gancho CBT"]
+        fn with_the_pin_cap_reached_the_icon_warns_and_pins_nothing() {
+            // Aceite 8: teto 2, já com 2 fixados.
+            let f = Fixture::with(
+                &["P", "Q", "A", "B"],
+                Setup {
+                    pinned: &["P", "Q"],
+                    max_pinned: Some(2),
+                    ..Setup::default()
+                },
+            );
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["P", "Q", "A", "B"]));
+            let selected = f.window.selected_clip_id();
+            let closer = DialogCloser::install();
+            f.click(f.pin(2));
+            assert_eq!(closer.titles(), vec!["Fixar item — duplicata".to_string()]);
+            assert_eq!(sorted(f.pinned_ids()), sorted(f.ids_of(&["P", "Q"])));
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["P", "Q", "A", "B"]));
+            assert_eq!(f.window.selected_clip_id(), selected);
+            // Visibilidade não conferida: o aviso modal toma o primeiro plano
+            // e o `WM_ACTIVATE` da janela a esconde, como já acontece pelo
+            // menu (mesmo `show_pin_cap_message`). Pendência registrada.
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn with_the_image_filter_the_pinned_image_stays_in_the_filter() {
+            // Aceite 9.
+            let f = Fixture::with(
+                &["T", "I1", "I2"],
+                Setup {
+                    images: &["I1", "I2"],
+                    ..Setup::default()
+                },
+            );
+            f.key(VK_TAB);
+            f.key(VK_RIGHT);
+            f.key(VK_RIGHT);
+            assert_eq!(
+                f.window.visible_clip_ids(),
+                f.ids_of(&["I1", "I2"]),
+                "filtro Imagem"
+            );
+            let selected = f.window.selected_clip_id();
+            f.click(f.pin(1));
+            assert_eq!(f.pinned_ids(), f.ids_of(&["I2"]));
+            assert_eq!(
+                f.window.visible_clip_ids(),
+                f.ids_of(&["I2", "I1"]),
+                "continua no filtro Imagem"
+            );
+            assert_eq!(f.window.selected_clip_id(), selected);
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        /// Cobre o conjunto de proteções com a faixa de erro aberta, não uma
+        /// só: a lista é esvaziada na falha de leitura, `row_hit` não acha
+        /// linha com a faixa, o clique simples vai para a faixa e o segundo
+        /// clique é ignorado pelo `ClickGuard` armado pela lixeira. Nenhum
+        /// efeito da faixa é observável aqui (`may_offer_recreate` é falso no
+        /// `Fixture`), por isso o teste só confere que nada foi fixado.
+        fn with_the_error_banner_no_click_on_the_pin_spot_pins_anything() {
+            let f = Fixture::new(&["A", "B"]);
+            // A recarga depois de apagar B falha: a faixa de erro toma a tela.
+            f.fail_list.store(true, Ordering::SeqCst);
+            f.click(f.trash(1));
+            assert_eq!(f.stored_ids(), f.ids_of(&["A"]));
+
+            f.click(f.pin(0));
+            f.send(WM_LBUTTONDBLCLK, 0, f.pin(0));
+            assert!(f.pinned_ids().is_empty(), "nada foi fixado");
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; o gancho CBT anota qualquer aviso"]
+        fn the_pin_of_an_item_already_deleted_rereads_the_list_without_warning() {
+            let f = Fixture::new(&["A", "B", "C"]);
+            let gone = f.id("B");
+            assert!(f.repo.lock().unwrap().delete_one(gone).expect("apagar"));
+            let closer = DialogCloser::install();
+            f.click(f.pin(1));
+            assert!(closer.titles().is_empty(), "nenhum aviso");
+            assert!(f.pinned_ids().is_empty(), "nada foi fixado");
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "C"]));
+            assert!(f.visible());
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn a_double_click_on_the_pin_pins_once_and_pastes_nothing() {
+            // Aceite 7: o segundo clique cai sobre a linha que tomou o lugar
+            // de C e não pode colar, fixar nem apagar.
+            let f = Fixture::new(&["B", "C", "A"]);
+            f.send(WM_LBUTTONDOWN, 0, f.pin(1));
+            f.send(WM_LBUTTONDBLCLK, 0, f.pin(1));
+            assert_eq!(f.pinned_ids(), f.ids_of(&["C"]), "só C, uma vez");
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["C", "B", "A"]));
+            assert_eq!(f.stored_ids().len(), 3, "nada apagado");
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 0, "nada colado");
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("B")));
+            assert!(f.visible());
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn a_double_click_on_the_text_still_pastes_with_the_pin_column() {
+            let f = Fixture::new(&["A", "B", "C"]);
+            f.send(WM_LBUTTONDOWN, 0, f.text(1));
+            f.send(WM_LBUTTONDBLCLK, 0, f.text(1));
+            assert_eq!(f.get_full_calls.load(Ordering::SeqCst), 1, "tentou colar");
+            assert_eq!(f.pasted(), Some(f.id("B")));
+            assert!(f.pinned_ids().is_empty());
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; cria janelas reais"]
+        fn the_preview_hides_over_the_pin_and_does_not_reopen_there() {
+            let long = "SELECT id, nome\n  FROM cliente\n\tWHERE ativo = 1\nORDER BY nome";
+            let f = Fixture::new(&[long, "curto"]);
+            let popup = f
+                .window
+                .hover_popup_hwnd()
+                .expect("o histórico cria o popup");
+            // SAFETY: consulta sem pré-condição.
+            let popup_visible = || unsafe { IsWindowVisible(popup) }.as_bool();
+
+            f.send(WM_MOUSEMOVE, 0, f.text(0));
+            f.send(WM_MOUSEHOVER, 0, f.text(0));
+            assert!(popup_visible(), "no texto a pré-visualização abre");
+
+            f.send(WM_MOUSEMOVE, 0, f.pin(0));
+            assert!(!popup_visible(), "entrar no alfinete esconde");
+            f.send(WM_MOUSEHOVER, 0, f.pin(0));
+            assert!(!popup_visible(), "parado no alfinete não reabre");
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; pinta a janela de verdade"]
+        fn the_mouse_repaints_when_it_enters_the_pin_icon() {
+            let f = Fixture::new(&ABCD);
+            f.send(WM_MOUSEMOVE, 0, f.text(2));
+            f.paint_now();
+            assert!(!f.has_update_region());
+
+            f.send(WM_MOUSEMOVE, 0, f.pin(2));
+            assert!(f.has_update_region(), "entrou no alfinete: fundo do hover");
+            f.paint_now();
+
+            f.send(WM_MOUSEMOVE, 0, point(ROW_HEIGHT_PX / 2 + 1, f.row_y(2)));
+            assert!(!f.has_update_region(), "mesmo alfinete: nada a pintar");
+
+            f.send(WM_MOUSEMOVE, 0, f.text(2));
+            assert!(f.has_update_region(), "saiu do alfinete");
+            f.paint_now();
+        }
+
+        #[test]
+        #[ignore = "precisa de sessão gráfica; mexe na tabela de teclado da thread"]
+        fn ctrl_p_and_the_icon_toggle_the_same_item_state() {
+            use windows::Win32::UI::Input::KeyboardAndMouse::VK_P;
+            let ctrl_p = |f: &Fixture| {
+                let _ctrl = super::super::HeldCtrl::press();
+                f.key(VK_P.0);
+            };
+
+            let f = Fixture::new(&["A", "B", "C"]);
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+            ctrl_p(&f);
+            assert_eq!(f.pinned_ids(), f.ids_of(&["A"]), "Ctrl+P fixou A");
+            f.click(f.pin(0));
+            assert!(f.pinned_ids().is_empty(), "o ícone desafixou A");
+            assert_eq!(f.window.selected_clip_id(), Some(f.id("A")));
+            f.click(f.pin(0));
+            assert_eq!(f.pinned_ids(), f.ids_of(&["A"]), "o ícone fixou A");
+            ctrl_p(&f);
+            assert!(f.pinned_ids().is_empty(), "Ctrl+P desafixou A");
+            assert_eq!(f.window.visible_clip_ids(), f.ids_of(&["A", "B", "C"]));
+        }
     }
 
     mod default_selection {

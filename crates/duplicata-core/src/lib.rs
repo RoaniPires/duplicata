@@ -17,6 +17,7 @@ pub mod identity;
 pub mod list_view;
 pub mod log_fields;
 pub mod menu_icon;
+pub mod pin_button;
 pub mod pipeline;
 pub mod preview;
 pub mod queue;
@@ -69,7 +70,7 @@ pub use repository::{
     CaptureRecord, ClipListItem, HistoryRepository, SetPinnedOutcome, StoredClip, UpsertOutcome,
 };
 pub use retention::{cutoff_ms, over_count_by, pin_cap_reached};
-pub use row_layout::{badge_of, row_layout, thumbnail_target, RowBadge, RowLayout};
+pub use row_layout::{row_layout, thumbnail_target, RowLayout};
 pub use secret_pattern::{matches_secret_pattern, SecretPatternKind};
 pub use self_write_filter::SelfWriteFilter;
 pub use size_limit::check_size;

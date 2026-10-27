@@ -1,5 +1,4 @@
 use crate::filter_strip::Rect;
-use crate::list_view::{category_of, ContentTypeFilter};
 
 pub const REFERENCE_DPI: u32 = 96;
 
@@ -33,12 +32,6 @@ pub fn client_height_at(dpi: u32, scaled_nonclient: bool) -> i32 {
     WINDOW_HEIGHT_PX - nonclient
 }
 
-pub const PIN_STRIPE_PX: i32 = 3;
-
-pub const PIN_GUTTER_PX: i32 = 5;
-
-pub const TYPE_BADGE_PX: i32 = 30;
-
 pub const THUMBNAIL_MARGIN_PX: i32 = 2;
 
 pub const THUMBNAIL_MAX_WIDTH_PX: i32 = 72;
@@ -48,38 +41,6 @@ pub const TEXT_GAP_PX: i32 = 8;
 pub fn scale_px(logical_px: i32, dpi: u32) -> i32 {
     let dpi = if dpi == 0 { REFERENCE_DPI } else { dpi };
     ((logical_px as i64 * dpi as i64) / REFERENCE_DPI as i64) as i32
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RowBadge {
-    Text,
-    Image,
-    Files,
-    NoPreview,
-}
-
-impl RowBadge {
-    pub const fn label(self) -> &'static str {
-        match self {
-            RowBadge::Text => "Txt",
-            RowBadge::Image => "Img",
-            RowBadge::Files => "Arq",
-            RowBadge::NoPreview => "—",
-        }
-    }
-}
-
-pub fn badge_of(canonical_kind: &str) -> RowBadge {
-    match category_of(canonical_kind) {
-        Some(ContentTypeFilter::Text) => RowBadge::Text,
-        Some(ContentTypeFilter::Image) => RowBadge::Image,
-        Some(ContentTypeFilter::Files) => RowBadge::Files,
-        Some(ContentTypeFilter::All) | None => RowBadge::NoPreview,
-    }
-}
-
-pub fn pin_reserved_px(dpi: u32) -> i32 {
-    scale_px(PIN_STRIPE_PX, dpi) + scale_px(PIN_GUTTER_PX, dpi)
 }
 
 pub fn thumbnail_target(row_height_px: i32, dpi: u32, src_w: u32, src_h: u32) -> (i32, i32) {
@@ -101,8 +62,10 @@ pub fn thumbnail_target(row_height_px: i32, dpi: u32, src_w: u32, src_h: u32) ->
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowLayout {
-    pub pin_stripe: Rect,
-    pub type_badge: Rect,
+    /// Coluna do alfinete na ponta esquerda, reservada em toda linha (vazia
+    /// quando o ícone não aparece), para o texto começar sempre no mesmo ponto.
+    /// Numa linha estreita, para onde começa a zona da lixeira.
+    pub pin_button: Rect,
     pub thumbnail: Rect,
     pub text: Rect,
     /// Lixeira na ponta direita, só nas linhas que a mostram.
@@ -126,6 +89,25 @@ pub fn delete_button_rect(row: Rect, dpi: u32) -> Rect {
     }
 }
 
+/// Quadrado do alfinete: lado igual à altura da linha, encostado na borda
+/// esquerda, ocupando a altura toda e cortado na borda direita de `row`
+/// (espelho de [`delete_button_rect`]).
+///
+/// Como na lixeira, `dpi` não entra na conta: o lado é a altura real de
+/// `row`, já na escala da janela (só o glifo escala com o DPI).
+pub fn pin_button_rect(row: Rect, dpi: u32) -> Rect {
+    let _ = dpi;
+    // Altura negativa ou borda direita antes da esquerda: o piso em
+    // `row.left` deixa o quadrado vazio, nunca com largura negativa.
+    let side = row.bottom - row.top;
+    Rect {
+        left: row.left,
+        top: row.top,
+        right: (row.left + side).min(row.right).max(row.left),
+        bottom: row.bottom,
+    }
+}
+
 pub fn row_layout(row: Rect, dpi: u32, thumbnail: Option<(u32, u32)>) -> RowLayout {
     row_layout_with_delete(row, dpi, thumbnail, false)
 }
@@ -138,28 +120,17 @@ pub fn row_layout_with_delete(
     thumbnail: Option<(u32, u32)>,
     show_delete: bool,
 ) -> RowLayout {
-    let stripe_w = scale_px(PIN_STRIPE_PX, dpi);
-    let gutter = scale_px(PIN_GUTTER_PX, dpi);
-    let badge_w = scale_px(TYPE_BADGE_PX, dpi);
     let margin = scale_px(THUMBNAIL_MARGIN_PX, dpi);
     let gap = scale_px(TEXT_GAP_PX, dpi);
     let row_h = (row.bottom - row.top).max(0);
 
-    let pin_stripe = Rect {
-        left: row.left,
-        top: row.top + margin,
-        right: row.left + stripe_w,
-        bottom: (row.bottom - margin).max(row.top + margin),
-    };
-    let badge_left = row.left + stripe_w + gutter;
-    let type_badge = Rect {
-        left: badge_left,
-        top: row.top,
-        right: badge_left + badge_w,
-        bottom: row.bottom,
-    };
-
-    let mut cursor = type_badge.right;
+    // Onde os dois quadrados se sobrepõem (linha estreita), o clique é da
+    // lixeira, mesmo escondida (`zone_at`): o alfinete visível para antes.
+    // Sem piso aqui: a lixeira nunca começa antes de `row.left`.
+    let trash_left = delete_button_rect(row, dpi).left;
+    let mut pin_button = pin_button_rect(row, dpi);
+    pin_button.right = pin_button.right.min(trash_left);
+    let mut cursor = pin_button.right;
     let empty = Rect {
         left: cursor,
         top: row.top,
@@ -193,8 +164,7 @@ pub fn row_layout_with_delete(
         None => row.right,
     };
     RowLayout {
-        pin_stripe,
-        type_badge,
+        pin_button,
         thumbnail,
         text: Rect {
             left: text_left,
