@@ -28,7 +28,3 @@ Thumbs.db
 
 # NÃO ignorar: Cargo.lock (workspace com binário — trava as versões exatas)
 !Cargo.lock
-
-# Scripts de apoio dos ícones (assets/tools) — só o fonte .py é versionado.
-__pycache__/
-*.pyc

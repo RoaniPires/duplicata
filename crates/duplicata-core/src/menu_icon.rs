@@ -1,5 +1,13 @@
+/// Gerado (como `SETTINGS_DARK_ICO`) por `crates/duplicata-core/examples/settings_icons/gear.rs`;
+/// regenere com `cargo run -p duplicata-core --example settings_icons`. O teste
+/// `crates/duplicata-core/tests/settings_icons.rs` garante que o arquivo bate pixel a
+/// pixel com o gerador. Ver `assets/README.md`.
 pub const SETTINGS_LIGHT_ICO: &[u8] = include_bytes!("../../../assets/settings_light.ico");
 
+/// Gerado (como `SETTINGS_LIGHT_ICO`) por `crates/duplicata-core/examples/settings_icons/gear.rs`;
+/// regenere com `cargo run -p duplicata-core --example settings_icons`. O teste
+/// `crates/duplicata-core/tests/settings_icons.rs` garante que o arquivo bate pixel a
+/// pixel com o gerador. Ver `assets/README.md`.
 pub const SETTINGS_DARK_ICO: &[u8] = include_bytes!("../../../assets/settings_dark.ico");
 
 pub const fn settings_ico_for(dark: bool) -> &'static [u8] {
