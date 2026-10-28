@@ -120,7 +120,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "duplicata-app"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "duplicata-core",
  "duplicata-store",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "duplicata-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "image",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "duplicata-store"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "duplicata-core",
  "rusqlite",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "duplicata-win"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "duplicata-core",
  "image",
