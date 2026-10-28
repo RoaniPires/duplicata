@@ -47,7 +47,7 @@ jobs:
       - name: Aceitar o EULA do WiX (Open Source Maintenance Fee)
         run: wix eula accept wix7
 
-      - name: Adicionar a extensão WixToolset.Util.wixext (WixShellExec, FR-002a)
+      - name: Adicionar a extensão WixToolset.Util.wixext (WixShellExec, para lançar o app sem herdar elevação)
         run: wix extension add WixToolset.Util.wixext
 
       - name: Empacotar o MSI
@@ -73,7 +73,7 @@ jobs:
         with:
           subject-path: "installer/bin/*.msi"
 
-      - name: Publicar a release com o aviso do PG-003
+      - name: Publicar a release com o aviso de artefato não assinado
         if: github.ref_type == 'tag'
         shell: bash
         env:
@@ -84,4 +84,4 @@ jobs:
             "installer/bin/duplicata-$VERSION.msi" \
             --draft \
             --title "duplicata $GIT_SHA_SHORT (não assinado)" \
-            --notes "⚠️ **Artefato NÃO assinado** (nenhum certificado Authenticode) — não destinado à distribuição pública ampla (PG-003). Construído pela CI a partir do commit \`$GIT_SHA_SHORT\` deste repositório; nunca enviado manualmente (FR-005c). Antes de instalar, veja SECURITY.md (na raiz do repositório, neste commit) para verificar a procedência (atestado publicado por esta mesma execução, FR-027/028)."
+            --notes "⚠️ **Artefato NÃO assinado** (nenhum certificado Authenticode) — não destinado à distribuição pública ampla. Construído pela CI a partir do commit \`$GIT_SHA_SHORT\` deste repositório; nunca enviado manualmente. Antes de instalar, veja SECURITY.md (na raiz do repositório, neste commit) para verificar a procedência (atestado publicado por esta mesma execução)."

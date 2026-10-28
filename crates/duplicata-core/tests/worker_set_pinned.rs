@@ -197,6 +197,6 @@ fn set_pinned_after_apply_settings_uses_the_freshly_saved_ceiling() {
     assert_eq!(
         repo.count_pinned().unwrap(),
         1,
-        "o já-fixado não foi desafixado (FR-027)"
+        "o já-fixado não foi desafixado"
     );
 }

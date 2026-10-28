@@ -60,7 +60,7 @@ fn count(repo: &SqliteHistoryRepository, sql: &str) -> i64 {
 }
 
 #[test]
-fn us2_1_repeated_content_reuses_the_entry_and_bumps_recency() {
+fn repeated_content_reuses_the_entry_and_bumps_recency() {
     let (_d, mut repo) = repo();
     let first = repo.upsert(&rec("comando repetido", 100, vec![])).unwrap();
     let id = first.clip_id();
@@ -82,7 +82,7 @@ fn us2_1_repeated_content_reuses_the_entry_and_bumps_recency() {
 }
 
 #[test]
-fn us2_2_and_sc002_ten_repeats_intercalated_yield_one_entry_that_is_most_recent() {
+fn ten_repeats_intercalated_yield_one_entry_that_is_most_recent() {
     let (_d, mut repo) = repo();
     let x = "conteudo X";
 
@@ -108,7 +108,7 @@ fn us2_2_and_sc002_ten_repeats_intercalated_yield_one_entry_that_is_most_recent(
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(x_rows, 1, "10 repetições de X = 1 entrada (SC-002)");
+    assert_eq!(x_rows, 1, "10 repetições de X = 1 entrada");
 
     let newest_hash: Vec<u8> = repo
         .connection()
@@ -125,7 +125,7 @@ fn us2_2_and_sc002_ten_repeats_intercalated_yield_one_entry_that_is_most_recent(
 }
 
 #[test]
-fn us2_3_any_byte_difference_in_the_canonical_creates_a_new_entry() {
+fn any_byte_difference_in_the_canonical_creates_a_new_entry() {
     let (_d, mut repo) = repo();
     repo.upsert(&rec("linha\r\nfim", 1, vec![])).unwrap();
     repo.upsert(&rec("linha\nfim", 2, vec![])).unwrap();
@@ -134,7 +134,7 @@ fn us2_3_any_byte_difference_in_the_canonical_creates_a_new_entry() {
 }
 
 #[test]
-fn us2_4_first_capture_preserved_and_formats_replaced_by_most_recent() {
+fn first_capture_preserved_and_formats_replaced_by_most_recent() {
     let (_d, mut repo) = repo();
     repo.upsert(&rec(
         "codigo",
@@ -159,7 +159,7 @@ fn us2_4_first_capture_preserved_and_formats_replaced_by_most_recent() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(first, 100, "first_captured imutável (FR-007)");
+    assert_eq!(first, 100, "first_captured imutável");
     assert_eq!(last, 700);
 
     let html: Vec<u8> = repo
@@ -174,7 +174,7 @@ fn us2_4_first_capture_preserved_and_formats_replaced_by_most_recent() {
 }
 
 #[test]
-fn us2_5_browser_copy_then_editor_copy_collapse_to_one_entry() {
+fn browser_copy_then_editor_copy_collapse_to_one_entry() {
     let (_d, mut repo) = repo();
 
     let html = cf_html("<p>mesmo texto</p>", "https://exemplo.test/pagina");
@@ -205,7 +205,7 @@ fn us2_5_browser_copy_then_editor_copy_collapse_to_one_entry() {
 }
 
 #[test]
-fn us2_6_cf_html_with_different_fragment_offsets_is_still_one_entry() {
+fn cf_html_with_different_fragment_offsets_is_still_one_entry() {
     let (_d, mut repo) = repo();
     let html_a = cf_html("<p>trecho</p>", "https://site-a.test/artigo");
     let html_b = cf_html(
@@ -267,7 +267,7 @@ fn list_recent_orders_by_recency_after_a_dedupe_bump() {
 }
 
 #[test]
-fn fr006b_any_set_of_auxiliary_formats_never_affects_identity() {
+fn any_set_of_auxiliary_formats_never_affects_identity() {
     let (_d, mut repo) = repo();
     repo.upsert(&rec(
         "X",

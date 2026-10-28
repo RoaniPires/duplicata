@@ -2,8 +2,8 @@
 
 **Este build local NÃO é distribuível.** O único artefato que pode ser
 distribuído (restrita ou publicamente) é o produzido pela integração
-contínua a partir de um commit do repositório público (FR-005c) — ver
-`.github/workflows/release.yml` e `specs/005-install-and-distribution/research.md` R4/R7.
+contínua a partir de um commit do repositório público — ver
+`.github/workflows/release.yml`.
 Um MSI gerado localmente não tem procedência verificável nem pode ser
 submetido à assinatura.
 
@@ -20,9 +20,9 @@ submetido à assinatura.
   ferramenta, para uso comercial acima de US$10.000/ano de receita) — mas é
   decisão do mantenedor aceitar o EULA, fixar uma versão anterior sem essa
   exigência (`--version 5.0.2`, sem patch desde abr/2025) ou reavaliar a
-  ferramenta. Ver a pendência registrada em `research.md`, logo após a R1.
+  ferramenta.
 - Extensão utilitária do WiX (`WixShellExec`, usada para lançar o app sem
-  herdar elevação — FR-002a): precisa estar **adicionada ao cache local**
+  herdar elevação): precisa estar **adicionada ao cache local**
   antes do primeiro build, uma vez por máquina —
   `wix extension add WixToolset.Util.wixext`. Sem esse passo, `wix build`
   falha com `WIX0144: The extension 'WixToolset.Util.wixext' could not be
@@ -89,17 +89,17 @@ usa (`roxmltree`) é só dependência de desenvolvimento e não entra no build d
 ## Estrutura
 
 - `duplicata.wxs` — definição do pacote MSI. `UpgradeCode` é **fixo para
-  sempre**; nunca regenerar (research.md R6, FR-021a/b).
-- `Scope="perUser"` — instalação por usuário, sem elevação (FR-001,
-  research.md R1).
+  sempre**; nunca regenerar: é por ele que o `MajorUpgrade` reconhece a versão
+  instalada como a mesma aplicação e faz a atualização por cima. Com outro
+  `UpgradeCode`, a versão anterior não é encontrada e as duas ficam instaladas
+  lado a lado.
+- `Scope="perUser"` — instalação por usuário: o instalador não pede elevação
+  de administrador.
 - Instala em `%LocalAppData%\Programs\duplicata\duplicata.exe`.
-- `MSIRESTARTMANAGERCONTROL="Disable"` — Restart Manager desligado (FR-024e).
+- `MSIRESTARTMANAGERCONTROL="Disable"` — Restart Manager desligado: ligado,
+  ele faria o instalador fechar o duplicata como fim de sessão, e o app pularia
+  a consolidação do banco e a re-encriptação, deixando a cópia de trabalho do
+  histórico em texto claro no disco.
 - `WixShellExec` lança o app ao fim da instalação, sem herdar elevação do
-  instalador (FR-002/FR-002a) — ver o comentário no `.wxs` sobre o que ainda
+  instalador — ver o comentário no `.wxs` sobre o que ainda
   não está verificado nesse caminho.
-
-## O que ainda falta (fases posteriores da Fatia 5)
-
-Registro de desinstalação com diálogo de escolha de dados, entrada de
-inicialização automática, `MajorUpgrade`/recusa de downgrade — ver
-`specs/005-install-and-distribution/tasks.md`, fases 4–6 (US2–US4).

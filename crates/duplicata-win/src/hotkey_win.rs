@@ -21,7 +21,7 @@ pub fn register(hwnd: HWND, combo: &HotkeyCombo) -> windows::core::Result<()> {
 
 pub fn unregister(hwnd: HWND) -> windows::core::Result<()> {
     // SAFETY: idempotente o suficiente para os caminhos de troca de atalho
-    // (US4) e de shutdown; `UnregisterHotKey` de um id não registrado só
+    // e de shutdown; `UnregisterHotKey` de um id não registrado só
     // devolve erro, sem efeito colateral.
     unsafe { UnregisterHotKey(Some(hwnd), HOTKEY_ID) }
 }

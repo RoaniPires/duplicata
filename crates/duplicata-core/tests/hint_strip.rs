@@ -34,7 +34,7 @@ fn the_type_filter_is_advertised_as_tab_plus_arrows_never_tab_alone() {
     assert_eq!(type_hint.keys, "Tab+←→");
     assert_ne!(
         type_hint.keys, "Tab",
-        "`Tab` sozinho não filtra nada — ele só leva o foco à faixa (FR-034)"
+        "`Tab` sozinho não filtra nada — ele só leva o foco à faixa"
     );
     assert!(
         hint_line().contains("Tab+←→ tipo"),
@@ -80,7 +80,7 @@ fn deleting_the_whole_history_is_not_in_the_strip_and_has_no_shortcut() {
         assert!(
             !line.contains(forbidden),
             "\"Apagar todo o histórico\" não pode ter atalho nem aparecer no \
-             rodapé (FR-034c) — achei {forbidden:?} em {line:?}"
+             rodapé — achei {forbidden:?} em {line:?}"
         );
     }
 }
@@ -104,8 +104,7 @@ fn the_window_is_wide_enough_for_the_whole_hint_line() {
         client >= needed,
         "a linha do rodapé precisa de {needed}px de cliente e a janela de \
          {WINDOW_WIDTH_PX}px só oferece {client}px — ela sairia cortada por \
-         `DT_END_ELLIPSIS`, escondendo o fim (`Tab+←→ tipo · Esc fechar`) e \
-         violando o \"legível e alinhado à janela\" do FR-032."
+         `DT_END_ELLIPSIS`, escondendo o fim (`Tab+←→ tipo · Esc fechar`)."
     );
 }
 

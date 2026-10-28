@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(
             clock.sleep_calls(),
             1,
-            "só uma pausa — FR-015c não é um laço ilimitado"
+            "só uma pausa: a nova tentativa não é um laço ilimitado"
         );
     }
 
@@ -430,7 +430,7 @@ mod tests {
         assert!(
             !msg.to_lowercase()
                 .contains("alguns arquivos não puderam ser removidos"),
-            "mensagem genérica proibida pelo FR-015d: {msg}"
+            "mensagem genérica proibida: {msg}"
         );
     }
 }

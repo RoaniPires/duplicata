@@ -330,7 +330,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
         }
         WM_CREATE => {
-            // (Fatia 4, FR-006a) Adota o tema do Windows na ABERTURA — só a
+            // Adota o tema do Windows na ABERTURA — só a
             // barra de título / frame; não repinta ao vivo.
             // SAFETY: dentro do próprio WM_CREATE de `hwnd`.
             unsafe {
@@ -354,11 +354,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_CLOSE => {
-            // Ao contrário da HistoryWindow (FR-031, nunca destruída), este
+            // Ao contrário da HistoryWindow (nunca destruída), este
             // diálogo é descartável: o botão de fechar (X)/Alt+F4/menu de
             // sistema dispensa sem escolher um atalho, deixando o app sem
-            // nenhum atalho global nesta sessão — estado visível e aceitável
-            // (Princípio VII), não um crash.
+            // nenhum atalho global nesta sessão: estado visível e aceitável pelo
+            // princípio "Erros de inicialização são sempre visíveis", não um crash.
             // SAFETY: `hwnd` é o desta janela.
             unsafe {
                 let _ = DestroyWindow(hwnd);
@@ -406,7 +406,7 @@ mod tests {
         assert!(!already_current(Some(other), combo));
         assert!(
             !already_current(None, combo),
-            "FR-048a: nada registrado nunca é \"já é a atual\", mesmo que a \
+            "nada registrado nunca é \"já é a atual\", mesmo que a \
              candidata seja igual à Config configurada"
         );
     }
@@ -426,15 +426,15 @@ mod tests {
             Path::new("config.toml"),
         );
         let ExchangeOutcome::Refused { message } = outcome else {
-            panic!("candidata sem modificador deveria ser recusada (FR-006)");
+            panic!("candidata sem modificador deveria ser recusada");
         };
         assert!(
             message.contains(&format_hotkey(&candidate)),
-            "FR-048b: a recusa deve NOMEAR a combinação recusada — mensagem: {message:?}"
+            "a recusa deve NOMEAR a combinação recusada — mensagem: {message:?}"
         );
         assert!(
             message.to_lowercase().contains("pressione outra"),
-            "FR-048b: a recusa deve oferecer a ação de escolher outra — mensagem: {message:?}"
+            "a recusa deve oferecer a ação de escolher outra — mensagem: {message:?}"
         );
     }
 
@@ -450,7 +450,7 @@ mod tests {
             Path::new("config.toml"),
         );
         let ExchangeOutcome::Refused { message } = outcome else {
-            panic!("a mesma combinação já registrada deveria ser recusada (FR-048)");
+            panic!("a mesma combinação já registrada deveria ser recusada");
         };
         assert!(message.contains(&format_hotkey(&combo)));
         assert!(message.to_lowercase().contains("já é a combinação"));
@@ -473,10 +473,7 @@ mod tests {
         let ExchangeOutcome::Refused { message } = outcome else {
             panic!("sem modificador deveria ser recusada");
         };
-        assert!(
-            message.contains("\"P\""),
-            "esperado \"P\" (FR-034d) em {message:?}"
-        );
+        assert!(message.contains("\"P\""), "esperado \"P\" em {message:?}");
         assert!(
             !message.contains(&format!("\"{}\"", candidate.format())),
             "NÃO deveria conter a grafia de serialização entre aspas (\"p\", minúscula) em \

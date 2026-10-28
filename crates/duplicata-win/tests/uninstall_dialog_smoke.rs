@@ -31,7 +31,7 @@ fn clicking_continue_with_the_default_selection_means_delete() {
     let clicker = thread::spawn(|| {
         let hwnd = find_dialog();
         // SAFETY: `hwnd`/`GetDlgItem` válidos; clica "Continuar" sem mexer
-        // nos rádios — "apagar" já vem marcado por padrão (FR-013).
+        // nos rádios — "apagar" já vem marcado por padrão.
         unsafe {
             let continue_btn =
                 GetDlgItem(Some(hwnd), ID_CONTINUE).expect("botão Continuar não encontrado");

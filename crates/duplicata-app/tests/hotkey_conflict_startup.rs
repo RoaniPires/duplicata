@@ -41,7 +41,7 @@ fn a_combo_already_registered_elsewhere_fails_to_register_again() {
     let result = hotkey_win::register(history_window.hwnd(), &combo);
     assert!(
         result.is_err(),
-        "a mesma combinação já registrada pela janela ocupante deve falhar aqui (FR-004/FR-007)"
+        "a mesma combinação já registrada pela janela ocupante deve falhar aqui"
     );
 
     let _ = hotkey_win::unregister(occupier.hwnd());

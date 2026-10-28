@@ -208,7 +208,7 @@ fn visible_rows_over_700_items_stays_well_under_a_frame() {
     let per_call = started.elapsed() / iters;
     assert!(
         per_call.as_millis() < 16,
-        "visible_rows sobre 700 itens levou {per_call:?}/chamada — orçamento SC-004 é 16 ms; \
+        "visible_rows sobre 700 itens levou {per_call:?}/chamada — o orçamento é 16 ms; \
          suspeitar de regressão algorítmica"
     );
 }

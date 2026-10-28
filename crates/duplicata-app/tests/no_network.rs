@@ -45,7 +45,7 @@ fn cargo_lock_has_no_networking_crate_anywhere_in_the_workspace() {
     for banned in BANNED {
         assert!(
             !names.contains(banned),
-            "{banned} apareceu em Cargo.lock — viola o Princípio I (local-first, sem rede)"
+            "{banned} apareceu em Cargo.lock — viola a Privacidade por padrão (local-first, sem rede)"
         );
     }
 }

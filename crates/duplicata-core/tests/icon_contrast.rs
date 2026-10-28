@@ -149,7 +149,7 @@ fn each_settings_variant_contrasts_with_the_menu_it_is_for() {
             assert!(
                 frac >= 0.99,
                 "{name} {}px: só {:.1}% do glifo cruza {MIN_RATIO}:1 contra o menu \
-                 {tema} — a variante existe justamente para isso (FR-053)",
+                 {tema} — a variante existe justamente para isso",
                 e.width,
                 frac * 100.0
             );

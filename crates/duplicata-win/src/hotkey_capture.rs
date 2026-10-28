@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(
             owner(),
             CaptureOwner::SettingsSection,
-            "Esc desarma sem soltar a detenção (contracts §3)"
+            "Esc desarma sem soltar a detenção"
         );
     }
 

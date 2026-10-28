@@ -31,8 +31,8 @@ fn session_ending_defers_reseal_without_touching_the_work_copy() {
 
     assert!(
         work_path.exists(),
-        "com SESSION_ENDING marcado, shutdown_reseal MUST NOT tentar resealar (a operação é \
-         adiada para a reconciliação do próximo login, research.md R7 passo 4)"
+        "com SESSION_ENDING marcado, shutdown_reseal MUST NOT tentar resealar (a limpeza fica \
+         para a reconciliação do próximo login)"
     );
 }
 

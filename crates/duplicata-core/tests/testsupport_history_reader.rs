@@ -64,7 +64,7 @@ fn fake_list_for_display_orders_by_recency_and_respects_limit() {
     );
     assert!(
         items.iter().all(|i| i.thumbnail.is_none()),
-        "fake nunca escreve thumbnail — mesmo contrato do lado real antes da US1b gerar uma"
+        "fake nunca escreve thumbnail"
     );
     assert!(items.iter().all(|i| i.has_text));
 

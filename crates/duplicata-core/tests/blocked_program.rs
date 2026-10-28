@@ -217,6 +217,6 @@ fn same_content_from_different_source_programs_collapses_into_one_entry() {
         repo.len(),
         1,
         "source_program nunca compõe a chave de identidade — mesmo conteúdo de \
-         dois programas diferentes colapsa numa única entrada (dedupe por hash, Fatia 1)"
+         dois programas diferentes colapsa numa única entrada (dedupe por hash)"
     );
 }

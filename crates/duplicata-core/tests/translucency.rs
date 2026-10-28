@@ -72,7 +72,7 @@ fn every_transparency_comes_after_the_opaque_reset() {
         .unwrap();
     assert!(
         first_translucent > 0,
-        "abrir transparência antes de opacar o buffer é a regressão do R15"
+        "abrir transparência antes de opacar o buffer deixa a janela invisível se o plano parar no meio"
     );
 }
 
@@ -162,7 +162,7 @@ fn the_translucent_alpha_is_partial_not_zero() {
         );
         assert!(
             TRANSLUCENT_ALPHA < OPAQUE,
-            "sem translucidez nenhuma, não há FR-001a"
+            "sem translucidez nenhuma, o alfa translúcido não teria efeito"
         );
         assert!(
             TRANSLUCENT_ALPHA >= 200,

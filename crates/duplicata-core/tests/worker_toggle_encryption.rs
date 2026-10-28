@@ -63,10 +63,7 @@ fn captures_around_a_toggle_are_all_processed_in_order_and_the_toggle_is_not_a_c
     queue.close();
 
     assert_eq!(done_rx.recv().unwrap(), Ok(()), "toggle concluído");
-    assert!(
-        prog_rx.try_recv().is_ok(),
-        "progresso foi reportado (FR-018b)"
-    );
+    assert!(prog_rx.try_recv().is_ok(), "progresso foi reportado");
 
     let repo = worker.join().unwrap();
     let previews: Vec<Option<String>> = {

@@ -24,7 +24,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
-      - name: Árvore de deps de `image` em duplicata-core restrita a bmp+png (research.md R1, Fatia 2)
+      - name: Árvore de deps de `image` em duplicata-core restrita a bmp+png
         shell: bash
         run: |
           set -e
@@ -34,7 +34,7 @@ jobs:
           tree=$(cargo tree -p image --edges normal)
           echo "$tree"
           if echo "$tree" | grep -qE -- '-sys(\s|$|@)|openexr|dav1d|libwebp|zune-jpeg|jpeg[-_]decoder|ravif|\bqoi\b|\btiff\b|\bgif\b|\bexr\b|\bhdr\b|avif'; then
-            echo "::error::image trouxe um codec/dependência além de bmp+png (ou algo com binding C) — ver research.md R1. Confirme default-features=false e features=[\"bmp\",\"png\"] no Cargo.toml raiz."
+            echo "::error::image trouxe um codec/dependência além de bmp+png (ou algo com binding C). O duplicata só decodifica BMP (a imagem da área de transferência) e grava PNG (a miniatura); binding C tiraria a árvore de image do 100% Rust. Confirme default-features=false e features=[\"bmp\",\"png\"] no Cargo.toml raiz."
             exit 1
           fi
           echo "OK: árvore de image restrita a bmp+png, 100% Rust."
@@ -76,7 +76,7 @@ jobs:
           set -e
           pattern='TerminateProcess|process::abort'
           if grep -rEn "$pattern" crates/duplicata-win crates/duplicata-app; then
-            echo "::error::Encerramento forçado de processo encontrado em duplicata-win/duplicata-app — proibido pelo FR-024b (ver installer-contract.md §3: só --request-shutdown, sem force-kill)."
+            echo "::error::Encerramento forçado de processo encontrado em duplicata-win/duplicata-app. O encerramento só é pedido (--request-shutdown) e esperado sem teto: a operação que mais demora na saída é justamente a que não pode ser interrompida."
             exit 1
           fi
           echo "OK: nenhum TerminateProcess (ou equivalente) em duplicata-win/duplicata-app."

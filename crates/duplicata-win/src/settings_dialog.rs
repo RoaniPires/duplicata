@@ -67,7 +67,7 @@ const RETENTION_FLOOR_NOTE: PCWSTR = windows::core::w!(
      não contam para esse limite e nunca são removidos pela retenção automática. \
      O teto de fixados NÃO tem piso: 0 é válido e desliga a possibilidade de fixar \
      (itens já fixados continuam fixados). O teto tem, porém, um MÁXIMO absoluto \
-     de 200 — um valor maior é ajustado para 200 ao aplicar (Fatia 4, FR-030i)."
+     de 200 — um valor maior é ajustado para 200 ao aplicar."
 );
 
 const ENCRYPTION_TOGGLE_LABEL: PCWSTR =
@@ -386,7 +386,7 @@ unsafe fn create_children(hwnd: HWND, ctx: &mut SettingsDialogCtx) {
         ID_HEURISTIC_TOGGLE,
     );
     // SAFETY: `heuristic_checkbox` acabou de ser criado; estado inicial
-    // reflete a configuração atual (FR-007 default ligado).
+    // reflete a configuração atual (o padrão é ligado).
     unsafe {
         let initial = if ctx.config.borrow().heuristic_secret_detection {
             BST_CHECKED
@@ -500,7 +500,7 @@ unsafe fn create_children(hwnd: HWND, ctx: &mut SettingsDialogCtx) {
         ID_ENCRYPTION_TOGGLE,
     );
     // SAFETY: `encryption_checkbox` acabou de ser criado; estado inicial =
-    // estado real da proteção (derivado pelo bootstrap, data-model.md §A).
+    // estado real da proteção (derivado pelo bootstrap).
     unsafe {
         let initial = if ctx.config.borrow().encryption_enabled {
             BST_CHECKED
@@ -777,7 +777,7 @@ unsafe fn remove_selected(ctx: &SettingsDialogCtx) {
         cfg.blocked_programs.remove(index as usize);
     }
     drop(cfg);
-    let _ = ctx.config.borrow().persist(&ctx.config_path); // FR-005, best-effort
+    let _ = ctx.config.borrow().persist(&ctx.config_path); // best-effort
                                                            // SAFETY: `ctx.listbox` válido.
     unsafe { refresh_listbox(ctx) };
 }
@@ -899,7 +899,7 @@ unsafe fn apply_retention(ctx: &SettingsDialogCtx) {
 /// `ctx.hotkey_status`/`ctx.hotkey_alter` devem ser HWNDs válidos.
 unsafe fn refresh_hotkey_status(ctx: &SettingsDialogCtx) {
     if hotkey_capture::owner() == CaptureOwner::StandaloneDialog {
-        // (FR-049) O diálogo autônomo de conflito detém a captura — a seção
+        // O diálogo autônomo de conflito detém a captura — a seção
         // fica inativa, com o motivo E o caminho para resolver (não só "não
         // dá aqui").
         // SAFETY: contrato desta função.
@@ -919,7 +919,7 @@ unsafe fn refresh_hotkey_status(ctx: &SettingsDialogCtx) {
     }
 
     if hotkey_capture::is_armed() {
-        // (FR-047a) Estado armado visualmente indicado.
+        // Estado armado visualmente indicado.
         // SAFETY: contrato desta função.
         unsafe {
             set_edit_text(
@@ -1085,7 +1085,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
         }
         WM_CREATE => {
-            // (Fatia 4, FR-006a) Adota o tema do Windows na ABERTURA — só a
+            // Adota o tema do Windows na ABERTURA — só a
             // barra de título / frame; não repinta ao vivo (limitação conhecida
             // aceita: o diálogo pode ficar aberto por minutos editando a
             // denylist durante uma troca de tema).

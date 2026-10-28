@@ -32,7 +32,7 @@ fn assert_no_periodic_wakeups(
     );
     assert_eq!(
         timers, 0,
-        "{what}: chegaram {timers} WM_TIMER — alguém introduziu um temporizador. É exatamente o que o Princípio V proíbe."
+        "{what}: chegaram {timers} WM_TIMER — alguém introduziu um temporizador. É exatamente o que o princípio \"Zero despertares em ociosidade\" proíbe."
     );
     assert!(
         total <= AMBIENT_WAKEUP_CEILING,
@@ -742,8 +742,8 @@ fn opening_settings_arming_and_disarming_the_hotkey_capture_adds_no_periodic_wak
                 Some(LPARAM(0)),
             );
         }
-        // SAFETY: `settings_hwnd` válido — fecha antes de medir (fechar tudo,
-        // como o cenário do T076 pede).
+        // SAFETY: `settings_hwnd` válido — fecha antes de medir (o cenário mede
+        // com tudo fechado).
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(settings_hwnd);
         }

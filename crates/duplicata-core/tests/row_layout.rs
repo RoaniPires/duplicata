@@ -33,7 +33,7 @@ fn the_pin_column_never_costs_more_than_ten_percent_of_the_row() {
         assert!(
             reserved * 100 <= width * 10,
             "dpi={dpi}: o alfinete reserva {reserved}px de {width}px \
-             de linha (> 10%, FR-030)"
+             de linha (> 10%)"
         );
     }
 }
@@ -310,7 +310,7 @@ fn twelve_rows_still_fit_with_strip_search_and_hint_strip_at_every_scale() {
         assert!(
             rows >= MIN_VISIBLE_ROWS,
             "dpi={dpi}: cabem {rows} linhas (cliente {client}px, chrome \
-             {CHROME_PX}px) — abaixo do piso de {MIN_VISIBLE_ROWS} do FR-033a. \
+             {CHROME_PX}px) — abaixo do piso de {MIN_VISIBLE_ROWS}. \
              Ajuste WINDOW_HEIGHT_PX (constante única)."
         );
     }

@@ -197,7 +197,7 @@ unsafe fn create_children(hwnd: HWND, ctx: &mut Ctx) {
     y += 22 + 16;
 
     // SAFETY: os dois rádios acabaram de ser criados; "apagar" começa
-    // marcado (FR-013 — apagar pré-selecionado).
+    // marcado (vem pré-selecionado).
     unsafe {
         SendMessageW(radio_delete, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), None);
         SendMessageW(
@@ -328,8 +328,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_CLOSE => {
             // X/Alt+F4/menu de sistema: RESULT_DELETE fica no valor
-            // inicial (`false`, preservar) — fechar sem confirmar nunca
-            // apaga (Princípio III-A).
+            // inicial (`false`, preservar). Fechar a janela não é confirmar,
+            // e, na dúvida, os dados do usuário são preservados.
             // SAFETY: `hwnd` é o desta janela.
             unsafe {
                 let _ = DestroyWindow(hwnd);

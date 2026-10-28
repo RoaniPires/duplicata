@@ -198,8 +198,5 @@ fn reconcile_reassumes_and_reseals_an_orphan_work_copy_before_opening() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        both, 2,
-        "nenhum dado da work copy órfã foi perdido (FR-018f)"
-    );
+    assert_eq!(both, 2, "nenhum dado da work copy órfã foi perdido");
 }

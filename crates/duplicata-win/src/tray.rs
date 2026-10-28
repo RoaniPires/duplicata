@@ -495,7 +495,7 @@ mod tests {
         assert!(
             !handle.is_finished(),
             "não deve terminar sozinha enquanto o Sender ainda existe e nada foi enviado — \
-             provaria polling/busy-loop em vez de um bloqueio real (Princípio V)"
+             provaria polling/busy-loop em vez de um bloqueio real (Zero despertares em ociosidade)"
         );
 
         drop(tx);

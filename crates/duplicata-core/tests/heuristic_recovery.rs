@@ -29,7 +29,7 @@ fn a_reread_that_stays_busy_past_the_backoff_is_reported_as_failed() {
     );
     assert!(
         queue.is_empty(),
-        "nada pode ser enfileirado quando a releitura falha (FR-008e)"
+        "nada pode ser enfileirado quando a releitura falha"
     );
 }
 

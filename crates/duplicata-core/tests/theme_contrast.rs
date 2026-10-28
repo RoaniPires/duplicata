@@ -88,7 +88,7 @@ fn the_old_floor_still_holds_for_text_over_opaque_islands() {
         assert!(
             ratio >= MIN_HINT_CONTRAST,
             "tema {}: text_dim contra surface dá {ratio:.2}:1, abaixo do piso de \
-             {MIN_HINT_CONTRAST}:1 do FR-032a",
+             {MIN_HINT_CONTRAST}:1",
             if dark { "escuro" } else { "claro" }
         );
     }

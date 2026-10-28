@@ -292,7 +292,7 @@ fn toggling_the_heuristic_checkbox_updates_and_persists_config() {
     let cfg = Rc::new(RefCell::new(cfg_at(dir.path())));
     assert!(
         cfg.borrow().heuristic_secret_detection,
-        "pré-condição: default é ligado (FR-007)"
+        "pré-condição: default é ligado"
     );
 
     let _queue = open_dialog(&cfg, &config_path);
@@ -388,7 +388,7 @@ fn applying_retention_and_pin_ceiling_persists_clamps_and_enqueues_apply_setting
     assert_eq!(
         cfg.borrow().max_pinned,
         0,
-        "max_pinned = 0 é aceito como escrito (sem piso, FR-025)"
+        "max_pinned = 0 é aceito como escrito (sem piso)"
     );
     let on_disk = std::fs::read_to_string(&config_path).expect("config.toml deveria existir");
     let (reparsed, _) = Config::from_str_over(cfg_at(dir.path()), &on_disk);
@@ -448,7 +448,7 @@ fn a_pin_ceiling_above_200_is_clamped_to_200_by_the_ui_too() {
     assert_eq!(
         cfg.borrow().max_pinned,
         200,
-        "250 acima do teto de 200 deve ser ajustado para 200 (FR-030i)"
+        "250 acima do teto de 200 deve ser ajustado para 200"
     );
     let on_disk = std::fs::read_to_string(&config_path).expect("config.toml deveria existir");
     let (reparsed, _) = Config::from_str_over(cfg_at(dir.path()), &on_disk);
@@ -574,8 +574,8 @@ fn arming_the_capture_intercepts_keys_and_escape_disarms_without_closing() {
 
     // Uma tecla comum, sem nenhum modificador físico realmente pressionado
     // (o estado de uma sessão de teste automatizada) — deve ser recusada
-    // (FR-006 NoModifier) SEM desarmar (FR-047: sem "OK" separado, tenta de
-    // novo na hora).
+    // (sem modificador) SEM desarmar (não há "OK" separado: tenta de novo
+    // na hora).
     // SAFETY: `alter_btn` tem o subclass instalado; entrega direto a ele,
     // como o foco real entregaria.
     unsafe { SendMessageW(alter_btn, WM_KEYDOWN, Some(WPARAM(0x41)), None) };
@@ -587,10 +587,10 @@ fn arming_the_capture_intercepts_keys_and_escape_disarms_without_closing() {
     let refusal_text = unsafe { window_text(status) };
     assert!(
         refusal_text.to_lowercase().contains("modificador"),
-        "a recusa deve nomear o motivo (FR-048b) — texto: {refusal_text:?}"
+        "a recusa deve nomear o motivo — texto: {refusal_text:?}"
     );
 
-    // Esc desarma e NÃO fecha o diálogo (FR-047a).
+    // Esc desarma e NÃO fecha o diálogo.
     // SAFETY: idem acima.
     unsafe {
         SendMessageW(
@@ -614,13 +614,13 @@ fn arming_the_capture_intercepts_keys_and_escape_disarms_without_closing() {
     );
 
     // SAFETY: `hwnd` ainda válido — este `DestroyWindow` também prova
-    // FR-049a: a detenção não pode sobreviver a ele.
+    // que a detenção não pode sobreviver a ele.
     unsafe {
         let _ = DestroyWindow(hwnd);
     }
     assert_eq!(
         hotkey_capture::owner(),
         CaptureOwner::None,
-        "destruir a janela deve liberar a detenção (FR-049a)"
+        "destruir a janela deve liberar a detenção"
     );
 }

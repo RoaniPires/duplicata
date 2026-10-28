@@ -34,7 +34,7 @@ fn creating_the_window_against_a_fake_reader_succeeds() {
 }
 
 #[test]
-#[ignore = "precisa de sessão gráfica; julgamento visual é manual (quickstart.md §1)"]
+#[ignore = "precisa de sessão gráfica; julgamento visual é manual"]
 fn creating_the_window_applies_the_native_appearance_attributes() {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -164,7 +164,7 @@ fn typing_the_filter_never_hits_the_reader_again() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
-        "digitar no filtro NÃO pode disparar nova consulta ao banco (FR-019)"
+        "digitar no filtro NÃO pode disparar nova consulta ao banco"
     );
     println!("6 WM_CHAR processados, list_for_display chamado 1× no total");
 }
@@ -214,7 +214,7 @@ fn the_load_limit_includes_the_pin_cap() {
     assert_eq!(
         last_limit.load(Ordering::SeqCst),
         700,
-        "o limit passa a MAX_ROWS + max_pinned = 500 + 200 (FR-030h/030i)"
+        "o limit passa a MAX_ROWS + max_pinned = 500 + 200"
     );
     println!("limit: 525 com o default, 700 após set_max_pinned(200)");
 }
@@ -333,7 +333,7 @@ fn image_row(id: i64, w: u32, h: u32, pinned: bool) -> ClipListItem {
 }
 
 #[test]
-#[ignore = "precisa de sessão gráfica; julgamento visual é manual (quickstart.md §6)"]
+#[ignore = "precisa de sessão gráfica; julgamento visual é manual"]
 fn rows_show_a_proportional_thumbnail_and_paint_without_panicking_with_a_pinned_row() {
     use duplicata_core::row_layout;
     use duplicata_win::thumbnail_gdi::ThumbnailCache;
@@ -584,15 +584,15 @@ fn ctrl_p_pins_through_the_same_path_as_the_context_menu() {
     );
 
     // (b) O caractere de controle que `Ctrl+P` gera (0x10) também não pode
-    // fixar: o atalho chega por `WM_KEYDOWN`, nunca como caractere (research
-    // R10) — é isso que impede a colisão com a busca incremental.
+    // fixar: o atalho chega por `WM_KEYDOWN`, nunca como caractere — é isso
+    // que impede a colisão com a busca incremental.
     // SAFETY: idem.
     unsafe {
         SendMessageW(hwnd, WM_CHAR, Some(WPARAM(0x10)), Some(LPARAM(0)));
     }
     assert!(
         pins.lock().unwrap().is_empty(),
-        "`Ctrl+P` não pode chegar como WM_CHAR (FR-034a, research R10)"
+        "`Ctrl+P` não pode chegar como WM_CHAR"
     );
 
     // Limpa o filtro para a seleção voltar ao item 3.
@@ -618,7 +618,7 @@ fn ctrl_p_pins_through_the_same_path_as_the_context_menu() {
         recorded,
         vec![(3, true, SetPinnedOutcome::Applied)],
         "Ctrl+P tem de enfileirar SetPinned para o item selecionado (clip 3), \
-         fixando-o (FR-034a). `NotFound` aqui significa que o repositório do \
+         fixando-o. `NotFound` aqui significa que o repositório do \
          worker não tem a linha — defeito do teste, não do atalho"
     );
 
@@ -661,7 +661,7 @@ fn ctrl_p_pins_through_the_same_path_as_the_context_menu() {
         assert!(
             fits >= MIN_VISIBLE_ROWS,
             "cliente de {}px comporta só {fits} linhas com o chrome de {chrome}px \
-             — abaixo do piso de {MIN_VISIBLE_ROWS} (FR-033a)",
+             — abaixo do piso de {MIN_VISIBLE_ROWS}",
             client.bottom - client.top
         );
         println!(
@@ -943,7 +943,7 @@ fn the_hint_strip_fits_without_wasting_width() {
         measured <= text_area,
         "o rodapé mede {measured}px e a área de texto tem {text_area}px — sairia \
          cortado por `DT_END_ELLIPSIS`, escondendo `Tab+←→ tipo · Esc fechar` \
-         (FR-032). Suba WINDOW_WIDTH_PX para pelo menos {minimum}."
+         Suba WINDOW_WIDTH_PX para pelo menos {minimum}."
     );
     assert!(
         slack >= HINT_LINE_SLACK_PX,
@@ -1015,8 +1015,8 @@ fn opening_with_a_full_history_accepts_the_first_keystroke_within_100ms() {
     );
     assert!(
         elapsed.as_millis() <= 100,
-        "levou {elapsed:?} do atalho até aceitar a primeira tecla — o teto do \
-         SC-010/FR-038 é 100ms"
+        "levou {elapsed:?} do atalho até aceitar a primeira tecla — o teto é \
+         100ms"
     );
 }
 

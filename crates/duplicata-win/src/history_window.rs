@@ -341,7 +341,7 @@ impl Drop for HistoryWindow {
         delete_font(self._ctx.icon_font.get());
         // SAFETY: `hwnd` foi criado por nós; o processo só chega aqui no
         // shutdown — a janela nunca é destruída/recriada em uso normal
-        // (FR-031). O dono sai por último: destruí-lo destruiria o histórico
+        // O dono sai por último: destruí-lo destruiria o histórico
         // por baixo, e o `DestroyWindow(self.hwnd)` cairia num handle morto.
         unsafe {
             let _ = DestroyWindow(self.hwnd);
@@ -358,7 +358,7 @@ fn open_window(hwnd: HWND, ctx: &HistoryWindowCtx) {
 
     refresh_rows(ctx);
 
-    // (US3, FR-022/023/026) Reposiciona perto do cursor, no monitor certo,
+    // Reposiciona perto do cursor, no monitor certo,
     // dentro da área útil — ANTES de exibir. Só um `SetWindowPos`; a janela
     // continua criada uma única vez.
     // SAFETY: `hwnd` é a janela criada por `HistoryWindow::new`.
@@ -1000,7 +1000,7 @@ fn paint(hwnd: HWND, ctx: &HistoryWindowCtx) {
         let row_rect = row_rect(client, visible_idx);
         let is_selected = pos == selected;
 
-        // Seleção: par de realce do sistema (FR-003), sem cálculo de contraste
+        // Seleção: par de realce do sistema, sem cálculo de contraste
         // próprio. Linhas não selecionadas ficam com a superfície do tema já
         // pintada na limpeza da janela inteira.
         // SAFETY: `dc` válido; `row_rect` dentro do cliente.
@@ -1403,8 +1403,8 @@ fn paint_error_banner(
     recreate_allowed: bool,
     colors: &PaintColors,
 ) {
-    // (US1) O banner é pintado no mesmo `WM_PAINT` da janela e usa as mesmas
-    // cores de `SystemAppearance` — herda o repintar de tema ao vivo (FR-006).
+    // O banner é pintado no mesmo `WM_PAINT` da janela e usa as mesmas
+    // cores de `SystemAppearance` — herda o repintar de tema ao vivo.
     // Fundo SEMPRE opaco (a superfície do tema): um erro não deve ficar
     // translúcido e difícil de ler.
     // SAFETY: `hdc` válido — chamador (`paint`) está dentro do par
@@ -1466,7 +1466,7 @@ fn paint_error_banner(
 }
 
 fn paint_toggle_banner(hdc: HDC, client: RECT, t: ToggleUi, colors: &PaintColors) {
-    // (US1) Fundo opaco com a superfície do tema — mesmo motivo do banner de
+    // Fundo opaco com a superfície do tema — mesmo motivo do banner de
     // erro: um estado de progresso não deve ficar translúcido.
     // SAFETY: `hdc` válido — chamador (`paint`) está dentro do par
     // `BeginPaint`/`EndPaint`.
@@ -1662,11 +1662,10 @@ fn handle_keydown(hwnd: HWND, ctx: &HistoryWindowCtx, wparam: WPARAM) {
 
     if vk == VK_RETURN.0 {
         if let Some(clip_id) = selected_clip_id(ctx) {
-            // Shift+Enter é o controle distinto de "colar texto puro" (US3,
-            // Assumption do spec.md — a confirmação padrão continua em Enter
-            // puro/duplo clique, FR-014). Indisponível quando o item não tem
-            // `has_text`: `confirm_text_only` já trata isso (sem efeito se
-            // `stored.text_format` for `None`, FR-019).
+            // Shift+Enter é o controle distinto de "colar texto puro"; a
+            // confirmação padrão continua em Enter puro/duplo clique. Indisponível
+            // quando o item não tem `has_text`: `confirm_text_only` já trata isso
+            // (sem efeito se `stored.text_format` for `None`).
             // SAFETY: sem pré-condição — só consulta o estado atual da tecla.
             let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
             if shift_down {
@@ -2431,7 +2430,7 @@ fn trigger_delete_all(hwnd: HWND, ctx: &HistoryWindowCtx) {
             if pinned == 1 { "" } else { "s" },
         ));
         // SAFETY: ver acima. Default = "Sim" (`MB_DEFBUTTON1`, implícito) —
-        // "incluir itens fixados" MARCADA por padrão (FR-015a).
+        // "incluir itens fixados" MARCADA por padrão.
         let r = unsafe { MessageBoxW(Some(hwnd), &body, &title, MB_YESNOCANCEL | MB_ICONWARNING) };
         if r == IDYES {
             false

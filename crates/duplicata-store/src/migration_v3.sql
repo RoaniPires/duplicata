@@ -1,8 +1,8 @@
--- duplicata — migração v3 (Fatia 3, US5: fixar/desafixar).
+-- duplicata — migração v3 (fixar/desafixar).
 -- Aplicada por duplicata-store::migrations, guardada por
 -- schema_meta.schema_version. Não idempotente por si só (ALTER TABLE ADD
 -- COLUMN falha se a coluna já existir) — migrations::apply só a executa
--- quando schema_version < 3. Mesmo padrão da v2 (Fatia 2, has_text).
+-- quando schema_version < 3. Mesmo padrão da v2 (has_text).
 
 ALTER TABLE clip ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 

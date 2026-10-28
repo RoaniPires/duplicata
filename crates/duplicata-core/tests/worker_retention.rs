@@ -58,7 +58,7 @@ fn every_successful_capture_triggers_both_retention_purges() {
 
     assert_eq!(
         repo.purge_older_than_calls, 2,
-        "uma purga por idade após cada upsert bem-sucedido (FR-011, pós-upsert)"
+        "uma purga por idade após cada upsert bem-sucedido (pós-upsert)"
     );
     assert_eq!(
         repo.purge_over_count_calls, 2,
@@ -128,7 +128,7 @@ fn apply_retention_updates_the_snapshot_purges_now_and_is_not_a_processed_captur
     assert_eq!(
         repo.list_for_display(10).unwrap().len(),
         1,
-        "histórico cortado para 1 item na hora em que a configuração foi salva (FR-011)"
+        "histórico cortado para 1 item na hora em que a configuração foi salva"
     );
 }
 

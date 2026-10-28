@@ -1,4 +1,4 @@
--- duplicata — migração v2 (Fatia 2, US3: colar texto puro).
+-- duplicata — migração v2 (colar texto puro).
 -- Aplicada por duplicata-store::migrations, guardada por
 -- schema_meta.schema_version. Não idempotente por si só (ALTER TABLE ADD
 -- COLUMN falha se a coluna já existir) — migrations::apply só a executa

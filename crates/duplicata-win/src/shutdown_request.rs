@@ -47,7 +47,8 @@ pub fn request_shutdown() -> ShutdownOutcome {
         )
     };
 
-    // Passo 3: espera o processo sair, sem teto (FR-024a).
+    // Passo 3: espera o processo sair, sem teto: a operação que mais demora na
+    // saída é justamente a que não pode ser interrompida.
     // SAFETY: `process` tem `PROCESS_SYNCHRONIZE`, obtido acima; `INFINITE`
     // é o único valor aceito para "sem teto" nesta API.
     unsafe { WaitForSingleObject(process, INFINITE) };

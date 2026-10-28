@@ -32,7 +32,7 @@ fn list_for_display_on_the_read_connection_stays_under_30ms_with_500_items() {
     assert_eq!(items.len(), 500);
     assert!(
         elapsed.as_millis() <= 30,
-        "list_for_display na conexão de leitura deveria ficar em ≤30ms (SC-010); levou {elapsed:?}"
+        "list_for_display na conexão de leitura deveria ficar em ≤30ms; levou {elapsed:?}"
     );
 }
 

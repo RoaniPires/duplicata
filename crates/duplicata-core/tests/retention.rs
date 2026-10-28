@@ -44,7 +44,7 @@ fn pin_cap_is_reached_at_or_above_the_configured_ceiling() {
     );
     assert!(
         pin_cap_reached(26, 25),
-        "acima do teto (FR-027 baixou o teto): sem espaço"
+        "acima do teto (o teto foi baixado com itens já fixados): sem espaço"
     );
 }
 

@@ -98,8 +98,8 @@ fn building_the_icon_is_far_below_the_fifty_millisecond_budget() {
     println!("montar o ícone do menu: {:?}", elapsed);
     assert!(
         elapsed.as_millis() < 25,
-        "montar o ícone levou {elapsed:?} — metade do orçamento de 50ms do \
-         SC-031 já é muito, o `TrackPopupMenu` ainda vem depois"
+        "montar o ícone levou {elapsed:?} — metade do orçamento de 50ms \
+         já é muito, o `TrackPopupMenu` ainda vem depois"
     );
     // SAFETY: nosso.
     unsafe {
