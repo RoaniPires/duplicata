@@ -1,133 +1,305 @@
+//! Janela de Configurações.
+//!
+//! Casca: cria os controles, desenha com a paleta e a fonte do Histórico e
+//! executa os efeitos que `duplicata_core::settings_session` devolve. O que é
+//! reversível, o que o Aplicar, o Cancelar e o Salvar colocam em efeito e o
+//! texto da confirmação vêm de lá; a geometria vem de
+//! `duplicata_core::settings_layout`.
+//!
+//! Estrutura: a janela principal tem a área de conteúdo (filha com barra de
+//! rolagem, `content`), a linha de erro e o rodapé. As teclas de navegação
+//! (Tab, Shift+Tab, Esc) passam por [`pre_translate`], chamado pelo laço de
+//! mensagens, que restringe `IsDialogMessageW` a esta janela e à
+//! confirmação. Superfície opaca: os controles GDI não escrevem alfa.
+
+mod confirm;
+mod content;
+mod controls;
+mod tooltip;
+
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use duplicata_core::config::{MAX_MAX_PINNED, MIN_MAX_ITEMS, MIN_RETENTION_DAYS};
-use duplicata_core::{
-    format_hotkey, interpret_approval, startup_state, CaptureQueue, Config, HotkeyCombo,
-    StartupState, WorkItem,
+use duplicata_core::filter_strip::Rect as CoreRect;
+use duplicata_core::row_layout::scale_px;
+use duplicata_core::settings_input::NUMERIC_MAX_DIGITS;
+use duplicata_core::settings_layout::{settings_layout, LayoutMeasures, SettingsLayout};
+use duplicata_core::settings_session::{
+    startup_for_settings, Effect, HotkeyLineView, NumericField, SaveOutcome, SaveReport, SaveStep,
+    SettingsSession,
 };
-use windows::core::{BOOL, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use duplicata_core::settings_text as text;
+use duplicata_core::theme;
+use duplicata_core::{
+    interpret_approval, log_event, CaptureQueue, Config, HotkeyCombo, LogFields, WorkItem,
+};
+use tracing::Level;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, GetStockObject, DEFAULT_GUI_FONT, HFONT, HGDIOBJ,
+    BeginPaint, CreateCompatibleDC, CreateFontIndirectW, CreateSolidBrush, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint, FillRect, GetMonitorInfoW, GetTextMetricsW, InvalidateRect,
+    MonitorFromWindow, RedrawWindow, SelectObject, SetBkMode, SetTextColor, DT_END_ELLIPSIS,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
+    RDW_UPDATENOW, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{
+    SetWindowTheme, DRAWITEMSTRUCT, EM_SETLIMITTEXT, EM_SETSEL, WM_MOUSEHOVER, WM_MOUSELEAVE,
+};
+use windows::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    EnableWindow, GetFocus, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
+    VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, EnumChildWindows,
-    GetWindowLongPtrW, IsWindow, LoadCursorW, RegisterClassW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, BM_GETCHECK, BM_SETCHECK,
-    BS_AUTOCHECKBOX, BS_MULTILINE, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW,
-    LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
-    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN, WM_NCCREATE,
-    WM_NCDESTROY, WM_SETFONT, WM_SETTEXT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetDlgItem,
+    GetWindowLongPtrW, GetWindowRect, IsChild, IsDialogMessageW, IsWindow, LoadCursorW,
+    RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, EN_CHANGE, ES_AUTOHSCROLL,
+    ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LB_ADDSTRING,
+    LB_GETCURSEL, LB_RESETCONTENT, MSG, NONCLIENTMETRICSW, SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
+    WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_GETDLGCODE, WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETTEXT, WM_SETTINGCHANGE,
+    WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_CONTROLPARENT, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
+use crate::app_icon;
+use crate::dpi;
+use crate::history_window::{
+    ENCRYPTION_TOGGLE_IDLE, ENCRYPTION_TOGGLE_TO_ON, WM_APP_QUERY_ENCRYPTION_TOGGLE,
+    WM_APP_SET_MAX_PINNED, WM_APP_TOGGLE_ENCRYPTION,
+};
 use crate::hotkey_capture::{self, CaptureOwner};
-use crate::hotkey_dialog;
+use crate::hotkey_dialog::{self, OnSwapFailure};
 use crate::startup_registry;
+use crate::system_appearance::{self, SystemAppearance, ThemePalette};
+use crate::text_metrics;
+use crate::window_material;
 
-const BST_CHECKED: usize = 1;
-const BST_UNCHECKED: usize = 0;
+use controls::ControlColors;
+use tooltip::Tooltip;
 
 const CLASS_NAME: PCWSTR = windows::core::w!("duplicata_settings_dialog");
-const WINDOW_TITLE: PCWSTR = windows::core::w!("Configurações — duplicata");
-const WINDOW_WIDTH: i32 = 480;
-const WINDOW_HEIGHT_HINT: i32 = 680;
-const MARGIN: i32 = 14;
-const CONTENT_W: i32 = WINDOW_WIDTH - 2 * MARGIN - 4;
-
-const BLOCKLIST_WARNING: PCWSTR = windows::core::w!(
-    "A identificação é feita só pelo nome do arquivo executável (ex.: \"keepass.exe\"). \
-     Isso é uma conveniência contra vazamento acidental por aplicativos legítimos — \
-     NÃO é uma defesa contra um programa que se disfarce com o mesmo nome."
-);
-
-const HEURISTIC_TOGGLE_LABEL: PCWSTR = windows::core::w!(
-    "Descartar automaticamente conteúdo que aparenta ser segredo (chave privada, token, cartão)"
-);
-
-const RETENTION_DAYS_LABEL: PCWSTR = windows::core::w!("Prazo de retenção (dias):");
-const MAX_ITEMS_LABEL: PCWSTR = windows::core::w!("Quantidade máxima de itens não fixados:");
-const MAX_PINNED_LABEL: PCWSTR = windows::core::w!("Teto de itens fixados ao mesmo tempo:");
-
-const RETENTION_FLOOR_NOTE: PCWSTR = windows::core::w!(
-    "Prazo e quantidade têm mínimo de 1 dia e 1 item — um valor menor é ajustado \
-     para o mínimo ao aplicar. Com a quantidade máxima em 1, o histórico deixa de \
-     reter mais de um item: cada nova captura substitui a anterior. Itens fixados \
-     não contam para esse limite e nunca são removidos pela retenção automática. \
-     O teto de fixados NÃO tem piso: 0 é válido e desliga a possibilidade de fixar \
-     (itens já fixados continuam fixados). O teto tem, porém, um MÁXIMO absoluto \
-     de 200 — um valor maior é ajustado para 200 ao aplicar."
-);
-
-const ENCRYPTION_TOGGLE_LABEL: PCWSTR =
-    windows::core::w!("Proteger o arquivo do banco com a conta do Windows (criptografia DPAPI)");
-
-const ENCRYPTION_DISCLOSURE: PCWSTR = windows::core::w!(
-    "Protege o arquivo do banco contra alguém com acesso ao disco fora da sua conta \
-     do Windows (por exemplo, se o computador for perdido, roubado ou acessado por \
-     outra conta). NÃO protege contra outro programa em execução na sua própria \
-     sessão do Windows enquanto você estiver logado. Ativar/desativar reescreve o \
-     arquivo inteiro e pode demorar num banco grande; a janela continua respondendo."
-);
-
-const STARTUP_TOGGLE_LABEL: PCWSTR = windows::core::w!("Iniciar com o Windows");
-
-const STARTUP_DISAPPROVED_TEXT: &str = "Desativado pelo Gerenciador de Tarefas do Windows.";
-
-const HOTKEY_SECTION_LABEL: PCWSTR = windows::core::w!("Atalho global:");
-const HOTKEY_ALTER_LABEL: PCWSTR = windows::core::w!("Alterar");
 const SUBCLASS_HOTKEY_ID: usize = 1;
+/// `WPARAM` = 1 se a confirmação do Salvar foi aceita.
+const WM_APP_CONFIRM_RESULT: u32 = WM_APP + 40;
+/// Reserva para a combinação do atalho: a mais larga que se espera.
+const WIDEST_HOTKEY_SAMPLE: &str = "Ctrl+Shift+Alt+PageDown";
 
-const ID_LISTBOX: usize = 101;
-const ID_EDIT: usize = 102;
-const ID_ADD: usize = 103;
-const ID_REMOVE: usize = 104;
-const ID_HEURISTIC_TOGGLE: usize = 105;
-const ID_RETENTION_DAYS_EDIT: usize = 106;
-const ID_MAX_ITEMS_EDIT: usize = 107;
-const ID_APPLY_RETENTION: usize = 108;
-const ID_MAX_PINNED_EDIT: usize = 109;
-const ID_ENCRYPTION_TOGGLE: usize = 110;
-const ID_HOTKEY_ALTER: usize = 111;
-const ID_HOTKEY_STATUS: usize = 112;
-const ID_STARTUP_TOGGLE: usize = 113;
-const ID_STARTUP_STATUS: usize = 114;
+#[doc(hidden)]
+pub const ID_CONTENT: i32 = 200;
+#[doc(hidden)]
+pub const ID_ALTER: i32 = 201;
+#[doc(hidden)]
+pub const ID_STARTUP: i32 = 202;
+#[doc(hidden)]
+pub const ID_RETENTION: i32 = 203;
+#[doc(hidden)]
+pub const ID_MAX_ITEMS: i32 = 204;
+#[doc(hidden)]
+pub const ID_MAX_PINNED: i32 = 205;
+#[doc(hidden)]
+pub const ID_LIST: i32 = 206;
+#[doc(hidden)]
+pub const ID_LIST_EDIT: i32 = 207;
+#[doc(hidden)]
+pub const ID_ADD: i32 = 208;
+#[doc(hidden)]
+pub const ID_REMOVE: i32 = 209;
+#[doc(hidden)]
+pub const ID_SECRETS: i32 = 210;
+#[doc(hidden)]
+pub const ID_PROTECTION: i32 = 211;
+#[doc(hidden)]
+pub const ID_SAVE: i32 = 212;
+/// `IDCANCEL`: o Esc do `IsDialogMessageW` chega como o clique em Cancelar.
+#[doc(hidden)]
+pub const ID_CANCEL: i32 = 2;
+#[doc(hidden)]
+pub const ID_APPLY: i32 = 214;
+const IDOK: usize = 1;
 
-struct SettingsDialogCtx {
+#[derive(Clone, Copy, Default)]
+struct Controls {
+    content: HWND,
+    alter: HWND,
+    startup: HWND,
+    retention: HWND,
+    items: HWND,
+    pinned: HWND,
+    list: HWND,
+    list_edit: HWND,
+    add: HWND,
+    remove: HWND,
+    secrets: HWND,
+    protection: HWND,
+    save: HWND,
+    cancel: HWND,
+    apply: HWND,
+}
+
+impl Controls {
+    fn numeric(&self) -> [(HWND, NumericField); 3] {
+        [
+            (self.retention, NumericField::RetentionDays),
+            (self.items, NumericField::MaxItems),
+            (self.pinned, NumericField::MaxPinned),
+        ]
+    }
+
+    fn all(&self) -> [HWND; 14] {
+        [
+            self.alter,
+            self.startup,
+            self.retention,
+            self.items,
+            self.pinned,
+            self.list,
+            self.list_edit,
+            self.add,
+            self.remove,
+            self.secrets,
+            self.protection,
+            self.save,
+            self.cancel,
+            self.apply,
+        ]
+    }
+}
+
+/// Tema, fonte e pincéis no DPI atual. Recriado a cada troca de tema ou DPI.
+struct Look {
+    dark: bool,
+    palette: ThemePalette,
+    colors: ControlColors,
+    dpi: u32,
+    font: HFONT,
+    title_font: HFONT,
+    line_height: i32,
+    surface_brush: HBRUSH,
+    field_brush: HBRUSH,
+}
+
+impl Look {
+    fn load(dpi: u32) -> Look {
+        let appearance = SystemAppearance::read(dpi, false);
+        let palette = appearance.palette;
+        let surface = system_appearance::to_core(palette.surface);
+        let text = system_appearance::to_core(palette.text_primary);
+        let field = system_appearance::from_core(theme::subtle_hover_fill(surface, text));
+        let pressed = system_appearance::from_core(theme::composite_over(text, surface, 40));
+        let colors = ControlColors {
+            surface: palette.surface,
+            text: palette.text_primary,
+            dim: palette.text_dim,
+            border: palette.border,
+            field,
+            pressed,
+            accent: appearance.accent,
+            on_accent: palette.surface,
+            dpi,
+        };
+        let base = message_font(dpi);
+        // SAFETY: `base` é um `LOGFONTW` preenchido; as fontes são nossas e
+        // apagadas em `Look::release`.
+        let font = unsafe { CreateFontIndirectW(&base) };
+        let mut title = base;
+        title.lfHeight = base.lfHeight.saturating_mul(5) / 4;
+        title.lfWeight = FW_SEMIBOLD.0 as i32;
+        // SAFETY: idem.
+        let title_font = unsafe { CreateFontIndirectW(&title) };
+        // SAFETY: pincéis nossos, apagados em `Look::release`.
+        let (surface_brush, field_brush) =
+            unsafe { (CreateSolidBrush(palette.surface), CreateSolidBrush(field)) };
+        Look {
+            dark: appearance.dark,
+            palette,
+            colors,
+            dpi,
+            line_height: font_height(font),
+            font,
+            title_font,
+            surface_brush,
+            field_brush,
+        }
+    }
+
+    /// Só depois que nenhum controle usa mais as fontes (a nova já foi
+    /// entregue a eles) e a dica está escondida.
+    fn release(&self) {
+        for obj in [
+            HGDIOBJ(self.font.0),
+            HGDIOBJ(self.title_font.0),
+            HGDIOBJ(self.surface_brush.0),
+            HGDIOBJ(self.field_brush.0),
+        ] {
+            if !obj.is_invalid() {
+                // SAFETY: objetos criados em `Look::load`, sem DC que os
+                // tenha selecionados (as pinturas restauram o anterior).
+                unsafe {
+                    let _ = DeleteObject(obj);
+                }
+            }
+        }
+    }
+}
+
+struct SettingsCtx {
     config: Rc<RefCell<Config>>,
     config_path: PathBuf,
     queue: Arc<dyn CaptureQueue<WorkItem>>,
     history_hwnd: HWND,
     registered_hotkey: Rc<Cell<Option<HotkeyCombo>>>,
-    dialog_hwnd: HWND,
-    listbox: HWND,
-    edit: HWND,
-    heuristic_checkbox: HWND,
-    retention_days_edit: HWND,
-    max_items_edit: HWND,
-    max_pinned_edit: HWND,
-    encryption_checkbox: HWND,
-    startup_checkbox: HWND,
-    startup_status: HWND,
-    hotkey_status: HWND,
-    hotkey_alter: HWND,
-    font: HFONT,
-    font_owned: bool,
+    session: RefCell<SettingsSession>,
+    hwnd: Cell<HWND>,
+    controls: Cell<Controls>,
+    look: RefCell<Look>,
+    layout: Cell<SettingsLayout>,
+    scroll: Cell<i32>,
+    hotkey_view: RefCell<HotkeyLineView>,
+    error_line: Cell<Option<&'static str>>,
+    hover_row: Cell<Option<usize>>,
+    /// Último ponto do mouse (conteúdo) e a janela que o recebeu: o sistema
+    /// repete o `WM_MOUSEMOVE` quando uma janela aparece sob o cursor parado.
+    mouse_at: Cell<Option<(HWND, POINT)>>,
+    tooltip: RefCell<Option<Tooltip>>,
+    confirm: Cell<Option<HWND>>,
+    last_focus: Cell<HWND>,
+    /// Campo sendo reescrito pela janela: o `EN_CHANGE` dele não é do usuário.
+    writing_fields: Cell<bool>,
+    /// Textos da última pintura, para os testes.
+    painted: RefCell<Vec<String>>,
 }
 
 thread_local! {
     static OPEN_HWND: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+enum Placement {
+    /// Centrada na área útil do monitor da janela.
+    Center,
+    /// Canto superior esquerdo pedido (o `RECT` sugerido do `WM_DPICHANGED`).
+    At(i32, i32),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Apply,
+    Cancel,
+    Save,
 }
 
 pub fn open(
@@ -137,589 +309,636 @@ pub fn open(
     history_hwnd: HWND,
     registered_hotkey: Rc<Cell<Option<HotkeyCombo>>>,
 ) {
-    if let Some(bits) = OPEN_HWND.with(Cell::get) {
-        let existing = HWND(bits as *mut core::ffi::c_void);
-        // SAFETY: `IsWindow` só consulta — seguro mesmo se `existing` for um
-        // handle de uma janela já destruída (devolve `false`, não UB).
-        if unsafe { IsWindow(Some(existing)) }.as_bool() {
-            // SAFETY: acabamos de confirmar que `existing` é uma janela viva;
-            // `ctx_ref` lê o mesmo `GWLP_USERDATA` que `WM_NCCREATE` põe nela.
-            unsafe {
-                let _ = SetForegroundWindow(existing);
-                if let Some(ctx) = ctx_ref(existing) {
-                    refresh_hotkey_status(ctx);
-                    refresh_startup_status(ctx);
-                }
-            }
-            return;
+    if let Some((hwnd, ctx)) = open_window() {
+        // Só traz para frente: o que estava pendente continua.
+        // SAFETY: `hwnd` é a janela viva de `open_window`.
+        unsafe {
+            let _ = SetForegroundWindow(ctx.confirm.get().unwrap_or(hwnd));
         }
+        refresh_hotkey_line(ctx);
+        return;
     }
 
+    let startup = startup_for_settings(
+        startup_registry::run_entry_present(),
+        interpret_approval(startup_registry::read_startup_approved_raw().as_deref()),
+    );
+    let mut session = SettingsSession::open(&config.borrow(), startup);
+    // SAFETY: `SendMessageW` síncrono para o Histórico, desta thread; para um
+    // `HWND` nulo (testes) devolve 0, que é "nenhuma reescrita".
+    let toggle =
+        unsafe { SendMessageW(history_hwnd, WM_APP_QUERY_ENCRYPTION_TOGGLE, None, None) }.0;
+    if toggle != ENCRYPTION_TOGGLE_IDLE {
+        session.protection_in_progress(toggle == ENCRYPTION_TOGGLE_TO_ON);
+    }
+
+    let ctx = Box::new(SettingsCtx {
+        config,
+        config_path,
+        queue,
+        history_hwnd,
+        registered_hotkey,
+        session: RefCell::new(session),
+        hwnd: Cell::new(HWND::default()),
+        controls: Cell::new(Controls::default()),
+        look: RefCell::new(Look::load(system_appearance::DEFAULT_DPI)),
+        layout: Cell::new(SettingsLayout::default()),
+        scroll: Cell::new(0),
+        hotkey_view: RefCell::new(HotkeyLineView {
+            combo: String::new(),
+            description: String::new(),
+            alter_enabled: true,
+        }),
+        error_line: Cell::new(None),
+        hover_row: Cell::new(None),
+        mouse_at: Cell::new(None),
+        tooltip: RefCell::new(None),
+        confirm: Cell::new(None),
+        last_focus: Cell::new(HWND::default()),
+        writing_fields: Cell::new(false),
+        painted: RefCell::new(Vec::new()),
+    });
+
+    let mut cursor = POINT::default();
+    // SAFETY: `GetCursorPos` só escreve `cursor`; falhar deixa (0, 0).
+    let _ = unsafe { GetCursorPos(&mut cursor) };
+    // SAFETY: `cursor` é uma coordenada de tela.
+    let (work, _) = unsafe { dpi::monitor_at(cursor) };
+
     // SAFETY: registro de classe idempotente com `wndproc` válido (mesmo
-    // padrão de `history_window.rs`/`hotkey_dialog.rs`/`tray.rs`); ignoramos
-    // o erro de "classe já registrada". `GetModuleHandleW(None)` pede o
-    // módulo do processo atual, sem pré-condição além disso.
+    // padrão das demais janelas); o erro de "classe já registrada" é
+    // ignorado. A janela nasce no monitor do cursor, para já ter o DPI dele;
+    // o `WM_CREATE` mede, redimensiona e centra.
     unsafe {
         let Ok(hinstance) = GetModuleHandleW(None) else {
             return;
         };
-        let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
             lpszClassName: CLASS_NAME,
-            hCursor: cursor,
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hIcon: app_icon::load_app_icon().unwrap_or_default(),
             ..Default::default()
         };
         RegisterClassW(&wc);
+        controls::register_toggle_class();
+        content::register_class();
 
-        let (font, font_owned) = ui_font();
-        let ctx = Box::new(SettingsDialogCtx {
-            config,
-            config_path,
-            queue,
-            history_hwnd,
-            registered_hotkey,
-            dialog_hwnd: HWND::default(),
-            listbox: HWND::default(),
-            edit: HWND::default(),
-            heuristic_checkbox: HWND::default(),
-            retention_days_edit: HWND::default(),
-            max_items_edit: HWND::default(),
-            max_pinned_edit: HWND::default(),
-            encryption_checkbox: HWND::default(),
-            startup_checkbox: HWND::default(),
-            startup_status: HWND::default(),
-            hotkey_status: HWND::default(),
-            hotkey_alter: HWND::default(),
-            font,
-            font_owned,
-        });
+        let title = wide(text::WINDOW_TITLE);
         let ctx_ptr = Box::into_raw(ctx);
-
         let Ok(hwnd) = CreateWindowExW(
-            Default::default(),
+            WS_EX_CONTROLPARENT,
             CLASS_NAME,
-            WINDOW_TITLE,
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT_HINT,
+            PCWSTR(title.as_ptr()),
+            main_style(),
+            work.left + 8,
+            work.top + 8,
+            200,
+            200,
             None,
             None,
             Some(hinstance.into()),
             Some(ctx_ptr.cast()),
         ) else {
+            // Sem soltar o contexto: se a janela chegou a nascer, o
+            // `WM_NCDESTROY` já o soltou; senão ele vaza, o lado seguro
+            // (nunca liberado duas vezes).
             return;
         };
 
         OPEN_HWND.with(|c| c.set(Some(hwnd.0 as isize)));
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-    }
-}
-
-/// # Safety
-/// `hwnd` deve ser a janela recém-criada recebendo seu próprio `WM_CREATE`.
-unsafe fn create_children(hwnd: HWND, ctx: &mut SettingsDialogCtx) {
-    ctx.dialog_hwnd = hwnd;
-
-    // SAFETY: `GetModuleHandleW(None)` pede o módulo do processo atual, sem
-    // pré-condição além disso.
-    let hinstance = unsafe { GetModuleHandleW(None) }.ok();
-
-    let mk = |class: PCWSTR,
-              text: PCWSTR,
-              extra: WINDOW_STYLE,
-              x: i32,
-              y: i32,
-              w: i32,
-              h: i32,
-              id: usize|
-     -> HWND {
-        let menu = if id == 0 {
-            None
-        } else {
-            Some(HMENU(id as *mut core::ffi::c_void))
-        };
-        // SAFETY: classe predefinida pelo sistema; `hwnd` é o pai, válido
-        // (dentro do próprio `WM_CREATE` dele).
-        unsafe {
-            CreateWindowExW(
-                Default::default(),
-                class,
-                text,
-                WS_CHILD | WS_VISIBLE | extra,
-                x,
-                y,
-                w,
-                h,
-                Some(hwnd),
-                menu,
-                hinstance.map(Into::into),
-                None,
-            )
+        if let Some(ctx) = ctx_of(hwnd) {
+            let _ = SetFocus(Some(ctx.controls.get().alter));
         }
-        .unwrap_or_default()
-    };
-
-    let plain = WINDOW_STYLE(0);
-    let m = MARGIN;
-    let cw = CONTENT_W;
-    let mut y = 12;
-
-    mk(
-        windows::core::w!("STATIC"),
-        HOTKEY_SECTION_LABEL,
-        plain,
-        m,
-        y + 3,
-        cw - 110,
-        18,
-        0,
-    );
-    let hotkey_status = mk(
-        windows::core::w!("STATIC"),
-        PCWSTR::null(),
-        plain,
-        m,
-        y + 22,
-        cw,
-        36,
-        ID_HOTKEY_STATUS,
-    );
-    let hotkey_alter = mk(
-        windows::core::w!("BUTTON"),
-        HOTKEY_ALTER_LABEL,
-        WS_TABSTOP,
-        m + cw - 90,
-        y,
-        90,
-        24,
-        ID_HOTKEY_ALTER,
-    );
-    y += 22 + 36 + 16;
-
-    // SAFETY: `hotkey_alter` acabou de ser criado por `mk` acima; `ctx`
-    // aponta para o `SettingsDialogCtx` vivo até `WM_NCDESTROY` — o mesmo
-    // endereço que `GWLP_USERDATA` guarda (`ctx` É o ponteiro reconstruído a
-    // partir dele em `ctx_ref`), então repassá-lo como `dwRefData` é válido
-    // por toda a vida do `BUTTON` (destruído junto com o pai, sempre ANTES
-    // do `WM_NCDESTROY` do pai que dropa o `Box` — ver doc do subclass).
-    unsafe {
-        let ctx_addr = ctx as *mut SettingsDialogCtx as usize;
-        let _ = SetWindowSubclass(
-            hotkey_alter,
-            Some(hotkey_alter_subclass),
-            SUBCLASS_HOTKEY_ID,
-            ctx_addr,
-        );
     }
-
-    mk(
-        windows::core::w!("STATIC"),
-        BLOCKLIST_WARNING,
-        plain,
-        m,
-        y,
-        cw,
-        78,
-        0,
-    );
-    y += 78 + 10;
-
-    let listbox = mk(
-        windows::core::w!("LISTBOX"),
-        PCWSTR::null(),
-        WS_BORDER | WS_VSCROLL | WS_TABSTOP,
-        m,
-        y,
-        cw,
-        116,
-        ID_LISTBOX,
-    );
-    y += 116 + 6;
-
-    let edit = mk(
-        windows::core::w!("EDIT"),
-        PCWSTR::null(),
-        WS_BORDER | WS_TABSTOP,
-        m,
-        y,
-        cw - 116,
-        24,
-        ID_EDIT,
-    );
-    mk(
-        windows::core::w!("BUTTON"),
-        windows::core::w!("Adicionar"),
-        WS_TABSTOP,
-        m + cw - 108,
-        y,
-        108,
-        24,
-        ID_ADD,
-    );
-    y += 24 + 4;
-
-    mk(
-        windows::core::w!("BUTTON"),
-        windows::core::w!("Remover selecionado"),
-        WS_TABSTOP,
-        m,
-        y,
-        180,
-        24,
-        ID_REMOVE,
-    );
-    y += 24 + 16;
-
-    let heuristic_checkbox = mk(
-        windows::core::w!("BUTTON"),
-        HEURISTIC_TOGGLE_LABEL,
-        WS_TABSTOP | duplicata_win_style(BS_AUTOCHECKBOX) | duplicata_win_style(BS_MULTILINE),
-        m,
-        y,
-        cw,
-        40,
-        ID_HEURISTIC_TOGGLE,
-    );
-    // SAFETY: `heuristic_checkbox` acabou de ser criado; estado inicial
-    // reflete a configuração atual (o padrão é ligado).
-    unsafe {
-        let initial = if ctx.config.borrow().heuristic_secret_detection {
-            BST_CHECKED
-        } else {
-            BST_UNCHECKED
-        };
-        SendMessageW(heuristic_checkbox, BM_SETCHECK, Some(WPARAM(initial)), None);
-    }
-    y += 40 + 16;
-
-    mk(
-        windows::core::w!("STATIC"),
-        RETENTION_DAYS_LABEL,
-        plain,
-        m,
-        y + 3,
-        cw - 90,
-        18,
-        0,
-    );
-    let retention_days_edit = mk(
-        windows::core::w!("EDIT"),
-        PCWSTR::null(),
-        WS_BORDER | WS_TABSTOP,
-        m + cw - 80,
-        y,
-        80,
-        22,
-        ID_RETENTION_DAYS_EDIT,
-    );
-    y += 22 + 8;
-
-    mk(
-        windows::core::w!("STATIC"),
-        MAX_ITEMS_LABEL,
-        plain,
-        m,
-        y,
-        cw,
-        18,
-        0,
-    );
-    y += 18 + 2;
-    let max_items_edit = mk(
-        windows::core::w!("EDIT"),
-        PCWSTR::null(),
-        WS_BORDER | WS_TABSTOP,
-        m,
-        y,
-        80,
-        22,
-        ID_MAX_ITEMS_EDIT,
-    );
-    y += 22 + 8;
-
-    mk(
-        windows::core::w!("STATIC"),
-        MAX_PINNED_LABEL,
-        plain,
-        m,
-        y,
-        cw,
-        18,
-        0,
-    );
-    y += 18 + 2;
-    let max_pinned_edit = mk(
-        windows::core::w!("EDIT"),
-        PCWSTR::null(),
-        WS_BORDER | WS_TABSTOP,
-        m,
-        y,
-        80,
-        22,
-        ID_MAX_PINNED_EDIT,
-    );
-    y += 22 + 12;
-
-    mk(
-        windows::core::w!("BUTTON"),
-        windows::core::w!("Aplicar retenção e teto de fixados"),
-        WS_TABSTOP,
-        m,
-        y,
-        300,
-        26,
-        ID_APPLY_RETENTION,
-    );
-    y += 26 + 12;
-
-    mk(
-        windows::core::w!("STATIC"),
-        RETENTION_FLOOR_NOTE,
-        plain,
-        m,
-        y,
-        cw,
-        132,
-        0,
-    );
-    y += 132 + 16;
-
-    let encryption_checkbox = mk(
-        windows::core::w!("BUTTON"),
-        ENCRYPTION_TOGGLE_LABEL,
-        WS_TABSTOP | duplicata_win_style(BS_AUTOCHECKBOX) | duplicata_win_style(BS_MULTILINE),
-        m,
-        y,
-        cw,
-        36,
-        ID_ENCRYPTION_TOGGLE,
-    );
-    // SAFETY: `encryption_checkbox` acabou de ser criado; estado inicial =
-    // estado real da proteção (derivado pelo bootstrap).
-    unsafe {
-        let initial = if ctx.config.borrow().encryption_enabled {
-            BST_CHECKED
-        } else {
-            BST_UNCHECKED
-        };
-        SendMessageW(
-            encryption_checkbox,
-            BM_SETCHECK,
-            Some(WPARAM(initial)),
-            None,
-        );
-    }
-    y += 36 + 4;
-    mk(
-        windows::core::w!("STATIC"),
-        ENCRYPTION_DISCLOSURE,
-        plain,
-        m,
-        y,
-        cw,
-        110,
-        0,
-    );
-    y += 110 + m;
-
-    let startup_checkbox = mk(
-        windows::core::w!("BUTTON"),
-        STARTUP_TOGGLE_LABEL,
-        WS_TABSTOP | duplicata_win_style(BS_AUTOCHECKBOX),
-        m,
-        y,
-        cw,
-        22,
-        ID_STARTUP_TOGGLE,
-    );
-    y += 22 + 2;
-    let startup_status = mk(
-        windows::core::w!("STATIC"),
-        PCWSTR::null(),
-        plain,
-        m,
-        y,
-        cw,
-        18,
-        ID_STARTUP_STATUS,
-    );
-    y += 18 + m;
-
-    ctx.listbox = listbox;
-    ctx.edit = edit;
-    ctx.heuristic_checkbox = heuristic_checkbox;
-    ctx.retention_days_edit = retention_days_edit;
-    ctx.max_items_edit = max_items_edit;
-    ctx.max_pinned_edit = max_pinned_edit;
-    ctx.encryption_checkbox = encryption_checkbox;
-    ctx.startup_checkbox = startup_checkbox;
-    ctx.startup_status = startup_status;
-    ctx.hotkey_status = hotkey_status;
-    ctx.hotkey_alter = hotkey_alter;
-
-    // Aplica a fonte de UI a TODOS os controles filhos — sem isto usam a
-    // fonte "System" bitmap larga, que corta os textos longos.
-    // SAFETY: `set_child_font` é um callback `extern "system"` válido; o
-    // `HFONT` (`ctx.font`) vive até `WM_NCDESTROY`.
-    unsafe {
-        let _ = EnumChildWindows(
-            Some(hwnd),
-            Some(set_child_font),
-            LPARAM(ctx.font.0 as isize),
-        );
-    }
-
-    let mut rc = RECT {
-        left: 0,
-        top: 0,
-        right: WINDOW_WIDTH,
-        bottom: y,
-    };
-    // SAFETY: `AdjustWindowRect` só calcula sobre `rc` (válido, local).
-    unsafe {
-        let _ = AdjustWindowRect(&mut rc, WS_POPUP | WS_CAPTION | WS_SYSMENU, false);
-    }
-    // SAFETY: `hwnd` é a janela desta função; `SWP_NOMOVE|SWP_NOZORDER`
-    // mantêm posição e ordem-Z, só o tamanho muda.
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            rc.right - rc.left,
-            rc.bottom - rc.top,
-            SWP_NOMOVE | SWP_NOZORDER,
-        );
-    }
-
-    // SAFETY: `ctx.listbox`/os três EDIT acabaram de ser criados, válidos.
-    unsafe { refresh_listbox(ctx) };
-    // SAFETY: idem — os três EDIT de retenção/fixados acabaram de ser criados.
-    unsafe { refresh_retention_edits(ctx) };
-    // SAFETY: idem — `ctx.hotkey_status`/`ctx.hotkey_alter` acabaram de ser
-    // criados.
-    unsafe { refresh_hotkey_status(ctx) };
-    // SAFETY: idem — `ctx.startup_checkbox`/`ctx.startup_status` acabaram
-    // de ser criados.
-    unsafe { refresh_startup_status(ctx) };
 }
 
-fn ui_font() -> (HFONT, bool) {
+/// Sair do duplicata com a janela aberta equivale a Cancelar.
+pub fn cancel_if_open() {
+    if let Some((hwnd, ctx)) = open_window() {
+        cancel(hwnd, ctx);
+    }
+}
+
+/// Chamado pelo Histórico quando a reescrita da proteção termina.
+pub fn on_protection_finished() {
+    if let Some((_, ctx)) = open_window() {
+        ctx.session.borrow_mut().protection_finished();
+        sync_toggles(ctx);
+    }
+}
+
+/// Navegação de teclado (Tab, Shift+Tab, Esc) e a dica de ferramenta sobre
+/// os controles. Devolve `true` quando a mensagem já foi tratada e não deve
+/// ser despachada.
+pub fn pre_translate(msg: &MSG) -> bool {
+    let Some((hwnd, ctx)) = open_window() else {
+        return false;
+    };
+    let content_hwnd = ctx.controls.get().content;
+    if matches!(msg.message, WM_MOUSEMOVE | WM_MOUSEHOVER | WM_MOUSELEAVE)
+        && msg.hwnd != content_hwnd
+        // SAFETY: `IsChild` só consulta a árvore de janelas.
+        && unsafe { IsChild(content_hwnd, msg.hwnd) }.as_bool()
+    {
+        content::forward_mouse(ctx, msg);
+    }
+    if let Some(confirm) = ctx.confirm.get() {
+        // SAFETY: `confirm` é válida ou já destruída: o resultado que ela manda
+        // logo depois de se destruir limpa `ctx.confirm`, e um `HWND` morto só
+        // faz o `IsDialogMessageW` devolver `false`; `msg` é válido.
+        return unsafe { IsDialogMessageW(confirm, msg) }.as_bool();
+    }
+    // SAFETY: `hwnd` é a janela viva de `open_window`; `IsDialogMessageW` só
+    // trata mensagens dela e das filhas e devolve `false` para as demais.
+    let handled = unsafe { IsDialogMessageW(hwnd, msg) }.as_bool();
+    // A janela pode ter fechado dentro do `IsDialogMessageW` (Esc).
+    if handled {
+        if let Some((_, ctx)) = open_window() {
+            reveal_focus(ctx);
+        }
+    }
+    handled
+}
+
+fn open_window() -> Option<(HWND, &'static SettingsCtx)> {
+    let bits = OPEN_HWND.with(Cell::get)?;
+    let hwnd = HWND(bits as *mut c_void);
+    // SAFETY: `IsWindow` só consulta, mesmo com um handle já destruído.
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return None;
+    }
+    ctx_of(hwnd).map(|ctx| (hwnd, ctx))
+}
+
+fn ctx_of(hwnd: HWND) -> Option<&'static SettingsCtx> {
+    // SAFETY: `GWLP_USERDATA` guarda o `*mut SettingsCtx` posto em
+    // `WM_NCCREATE`; válido até `WM_NCDESTROY`, que o desaloca e o zera.
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const SettingsCtx;
+    // SAFETY: nulo ou o ponteiro acima.
+    unsafe { ptr.as_ref() }
+}
+
+fn main_style() -> WINDOW_STYLE {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn message_font(dpi: u32) -> LOGFONTW {
     let mut ncm = NONCLIENTMETRICSW {
         cbSize: core::mem::size_of::<NONCLIENTMETRICSW>() as u32,
         ..Default::default()
     };
-    // SAFETY: `cbSize` preenchido (exigido pela API); `SystemParametersInfoW`
-    // com `SPI_GETNONCLIENTMETRICS` só lê para o buffer que passamos.
+    // SAFETY: `cbSize` preenchido (exigido pela API); a chamada só escreve
+    // no buffer passado, com a fonte já no DPI pedido.
     let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS.0,
             ncm.cbSize,
             Some(&mut ncm as *mut _ as *mut c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            0,
+            dpi,
         )
     }
     .is_ok();
     if ok {
-        // SAFETY: `ncm.lfMessageFont` foi preenchido pela chamada acima.
-        let f = unsafe { CreateFontIndirectW(&ncm.lfMessageFont) };
-        if !f.is_invalid() {
-            return (f, true);
+        ncm.lfMessageFont
+    } else {
+        LOGFONTW {
+            lfHeight: -scale_px(12, dpi),
+            ..Default::default()
         }
     }
-    // SAFETY: `GetStockObject` sem pré-condição; `DEFAULT_GUI_FONT` é um
-    // stock font válido (Tahoma/MS Sans Serif).
-    let stock: HGDIOBJ = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
-    (HFONT(stock.0), false)
 }
 
-unsafe extern "system" fn set_child_font(child: HWND, lparam: LPARAM) -> BOOL {
-    // SAFETY: contrato do callback; `1` no `LPARAM` pede redesenho imediato.
+fn font_height(font: HFONT) -> i32 {
+    // SAFETY: DC de memória criado e destruído aqui; a fonte volta a sair do
+    // DC antes do `DeleteDC`.
     unsafe {
-        SendMessageW(
-            child,
-            WM_SETFONT,
-            Some(WPARAM(lparam.0 as usize)),
-            Some(LPARAM(1)),
-        );
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return 16;
+        }
+        let old = (!font.is_invalid()).then(|| SelectObject(dc, HGDIOBJ(font.0)));
+        let mut tm = TEXTMETRICW::default();
+        let h = if GetTextMetricsW(dc, &mut tm).as_bool() {
+            tm.tmHeight.max(1)
+        } else {
+            16
+        };
+        if let Some(old) = old {
+            SelectObject(dc, old);
+        }
+        let _ = DeleteDC(dc);
+        h
     }
-    BOOL(1)
+}
+
+fn win_rect(r: CoreRect) -> RECT {
+    RECT {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+    }
+}
+
+fn measures(look: &Look) -> LayoutMeasures {
+    let font = look.font;
+    let width = |s: &str| text_metrics::width_with_font(font, s);
+    let mut widest_label = 0;
+    for o in text::OPTIONS {
+        widest_label = widest_label.max(width(o.name)).max(width(o.description));
+    }
+    for s in [
+        text::STARTUP_BLOCKED,
+        text::HOTKEY_ARMED,
+        text::HOTKEY_PENDING,
+    ] {
+        widest_label = widest_label.max(width(s));
+    }
+    let button_text_width = [
+        text::BUTTON_SAVE,
+        text::BUTTON_CANCEL,
+        text::BUTTON_APPLY,
+        text::BUTTON_ALTER,
+        text::BUTTON_ADD,
+        text::BUTTON_REMOVE,
+    ]
+    .iter()
+    .map(|s| width(s))
+    .max()
+    .unwrap_or(0);
+    LayoutMeasures {
+        dpi: look.dpi,
+        line_height: look.line_height,
+        title_height: font_height(look.title_font),
+        widest_label,
+        hotkey_text_width: width(WIDEST_HOTKEY_SAMPLE),
+        days_width: width(text::DAYS_UNIT),
+        numeric_text_width: width(&"0".repeat(NUMERIC_MAX_DIGITS)),
+        button_text_width,
+        // SAFETY: sem pré-condição.
+        scrollbar_width: unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, look.dpi) },
+    }
+}
+
+/// Retângulo do campo de texto dentro da moldura desenhada.
+fn field_inner(frame: CoreRect, line_height: i32, dpi: u32) -> CoreRect {
+    let pad = scale_px(8, dpi);
+    let top = frame.top + (frame.bottom - frame.top - line_height) / 2;
+    CoreRect {
+        left: frame.left + pad,
+        top,
+        right: frame.right - pad,
+        bottom: top + line_height,
+    }
+}
+
+fn list_inner(frame: CoreRect, dpi: u32) -> CoreRect {
+    let pad = scale_px(3, dpi);
+    CoreRect {
+        left: frame.left + pad,
+        top: frame.top + pad,
+        right: frame.right - pad,
+        bottom: frame.bottom - pad,
+    }
 }
 
 /// # Safety
-/// `ctx.retention_days_edit`/`ctx.max_items_edit`/`ctx.max_pinned_edit` devem
-/// ser `HWND`s de EDIT válidos.
-unsafe fn refresh_retention_edits(ctx: &SettingsDialogCtx) {
-    let (days, max_items, max_pinned) = {
-        let cfg = ctx.config.borrow();
-        (
-            cfg.retention.as_secs() / 86_400,
-            cfg.max_items,
-            cfg.max_pinned,
+/// `parent` é a janela que recebe o controle, desta thread.
+unsafe fn child(parent: HWND, class: PCWSTR, label: &str, style: WINDOW_STYLE, id: i32) -> HWND {
+    let label = wide(label);
+    // SAFETY: `GetModuleHandleW(None)` não tem pré-condição; `parent` válido
+    // (contrato); `label` vive durante a chamada.
+    unsafe {
+        let hinstance = GetModuleHandleW(None).ok();
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            class,
+            PCWSTR(label.as_ptr()),
+            WS_CHILD | WS_VISIBLE | style,
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            Some(HMENU(id as usize as *mut c_void)),
+            hinstance.map(Into::into),
+            None,
         )
+        .unwrap_or_default()
+    }
+}
+
+/// # Safety
+/// Dentro do `WM_CREATE` de `hwnd`, com `ctx` o contexto dela.
+unsafe fn build(hwnd: HWND, ctx: &SettingsCtx) {
+    ctx.hwnd.set(hwnd);
+    // SAFETY: `hwnd` válido (contrato).
+    let dpi = match unsafe { GetDpiForWindow(hwnd) } {
+        0 => system_appearance::DEFAULT_DPI,
+        d => d,
     };
-    // SAFETY: contrato desta função.
+    let old = ctx.look.replace(Look::load(dpi));
+    old.release();
+    let dark = ctx.look.borrow().dark;
+    controls::set_colors(ctx.look.borrow().colors);
+    // SAFETY: `hwnd` é esta janela, desta thread.
     unsafe {
-        set_edit_text(ctx.retention_days_edit, &days.to_string());
-        set_edit_text(ctx.max_items_edit, &max_items.to_string());
-        set_edit_text(ctx.max_pinned_edit, &max_pinned.to_string());
+        let _ = window_material::apply_attributes(hwnd, dark);
     }
-}
 
-/// # Safety
-/// `edit` deve ser um `HWND` de controle válido.
-unsafe fn set_edit_text(edit: HWND, text: &str) {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `edit` válido (contrato); `wide` NUL-terminado, ponteiro válido
-    // pela duração desta chamada síncrona.
-    unsafe {
-        SendMessageW(edit, WM_SETTEXT, None, Some(LPARAM(wide.as_ptr() as isize)));
-    }
-}
+    let button = WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32);
+    let numeric = WS_TABSTOP | WINDOW_STYLE((ES_NUMBER | ES_AUTOHSCROLL) as u32);
+    // SAFETY: `hwnd` é o pai, dentro do próprio `WM_CREATE`; a área de
+    // conteúdo é criada antes dos filhos dela, na ordem do Tab.
+    let c = unsafe {
+        let content = CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            content::CLASS_NAME,
+            PCWSTR::null(),
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+            0,
+            0,
+            0,
+            0,
+            Some(hwnd),
+            Some(HMENU(ID_CONTENT as usize as *mut c_void)),
+            GetModuleHandleW(None).ok().map(Into::into),
+            None,
+        )
+        .unwrap_or_default();
+        let b = windows::core::w!("BUTTON");
+        let e = windows::core::w!("EDIT");
+        let t = controls::TOGGLE_CLASS;
+        Controls {
+            content,
+            alter: child(content, b, text::BUTTON_ALTER, button, ID_ALTER),
+            startup: child(content, t, text::STARTUP.name, WS_TABSTOP, ID_STARTUP),
+            retention: child(content, e, "", numeric, ID_RETENTION),
+            items: child(content, e, "", numeric, ID_MAX_ITEMS),
+            pinned: child(content, e, "", numeric, ID_MAX_PINNED),
+            list: child(
+                content,
+                windows::core::w!("LISTBOX"),
+                "",
+                WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE((LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32),
+                ID_LIST,
+            ),
+            list_edit: child(
+                content,
+                e,
+                "",
+                WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                ID_LIST_EDIT,
+            ),
+            add: child(content, b, text::BUTTON_ADD, button, ID_ADD),
+            remove: child(content, b, text::BUTTON_REMOVE, button, ID_REMOVE),
+            secrets: child(content, t, text::SECRETS.name, WS_TABSTOP, ID_SECRETS),
+            protection: child(content, t, text::PROTECTION.name, WS_TABSTOP, ID_PROTECTION),
+            save: child(hwnd, b, text::BUTTON_SAVE, button, ID_SAVE),
+            cancel: child(hwnd, b, text::BUTTON_CANCEL, button, ID_CANCEL),
+            apply: child(hwnd, b, text::BUTTON_APPLY, button, ID_APPLY),
+        }
+    };
+    ctx.controls.set(c);
 
-const fn duplicata_win_style(bs: i32) -> windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE {
-    windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(bs as u32)
-}
-
-/// # Safety
-/// `ctx.listbox` deve ser um `HWND` de LISTBOX válido.
-unsafe fn refresh_listbox(ctx: &SettingsDialogCtx) {
-    // SAFETY: `ctx.listbox` válido (contrato desta função).
-    unsafe {
-        SendMessageW(ctx.listbox, LB_RESETCONTENT, None, None);
-    }
-    for prog in &ctx.config.borrow().blocked_programs {
-        let wide: Vec<u16> = prog.encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: `ctx.listbox` válido; `wide` é NUL-terminado, ponteiro
-        // válido pela duração desta chamada síncrona.
+    for (edit, _) in c.numeric() {
+        // SAFETY: `edit` acabou de ser criado.
         unsafe {
             SendMessageW(
-                ctx.listbox,
-                LB_ADDSTRING,
+                edit,
+                EM_SETLIMITTEXT,
+                Some(WPARAM(NUMERIC_MAX_DIGITS)),
                 None,
-                Some(LPARAM(wide.as_ptr() as isize)),
+            );
+        }
+    }
+    // SAFETY: `c.alter` acabou de ser criado; `ctx` vive até o
+    // `WM_NCDESTROY` da janela principal, que vem depois do de todos os
+    // filhos (o subclass sai no `WM_NCDESTROY` do botão).
+    unsafe {
+        let _ = SetWindowSubclass(
+            c.alter,
+            Some(alter_subclass),
+            SUBCLASS_HOTKEY_ID,
+            ctx as *const SettingsCtx as usize,
+        );
+    }
+    *ctx.tooltip.borrow_mut() = Tooltip::new(hwnd);
+
+    apply_fonts(ctx);
+    apply_control_themes(ctx);
+    sync_controls(ctx);
+    relayout(ctx, Placement::Center);
+    refresh_hotkey_line(ctx);
+    refresh_apply(ctx);
+}
+
+fn apply_fonts(ctx: &SettingsCtx) {
+    let font = ctx.look.borrow().font;
+    for h in ctx.controls.get().all() {
+        // SAFETY: `h` é filho desta janela; a fonte vive até o próximo
+        // `Look::release`, que só acontece depois de outra fonte entregue.
+        unsafe {
+            SendMessageW(
+                h,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(1)),
             );
         }
     }
 }
 
+/// Barra de rolagem e lista no tema do sistema. Sem os controles comuns v6
+/// no manifesto, a barra pode continuar clara.
+fn apply_control_themes(ctx: &SettingsCtx) {
+    let c = ctx.controls.get();
+    let theme = if ctx.look.borrow().dark {
+        windows::core::w!("DarkMode_Explorer")
+    } else {
+        windows::core::w!("Explorer")
+    };
+    for h in [
+        c.content,
+        c.list,
+        c.list_edit,
+        c.retention,
+        c.items,
+        c.pinned,
+    ] {
+        // SAFETY: `h` é desta janela; falhar só deixa o visual padrão.
+        unsafe {
+            let _ = SetWindowTheme(h, theme, PCWSTR::null());
+        }
+    }
+}
+
+/// Monitor e moldura da janela no DPI atual.
+fn work_area(hwnd: HWND) -> RECT {
+    // SAFETY: `hwnd` válido; `MONITOR_DEFAULTTONEAREST` sempre devolve um
+    // monitor; a chamada só escreve `mi`.
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1024,
+                bottom: 768,
+            }
+        }
+    }
+}
+
+fn frame_size(dpi: u32) -> (i32, i32) {
+    let mut r = RECT::default();
+    // SAFETY: só calcula sobre o `RECT` local.
+    let _ =
+        unsafe { AdjustWindowRectExForDpi(&mut r, main_style(), false, WS_EX_CONTROLPARENT, dpi) };
+    (r.right - r.left, r.bottom - r.top)
+}
+
+fn relayout(ctx: &SettingsCtx, placement: Placement) {
+    let hwnd = ctx.hwnd.get();
+    let (m, dpi) = {
+        let look = ctx.look.borrow();
+        (measures(&look), look.dpi)
+    };
+    let work = work_area(hwnd);
+    let (fw, fh) = frame_size(dpi);
+    let layout = settings_layout(&m, work.bottom - work.top - fh);
+    ctx.layout.set(layout);
+    let (w, h) = (layout.client_width + fw, layout.client_height + fh);
+    let (x, y) = match placement {
+        Placement::Center => (
+            work.left + (work.right - work.left - w) / 2,
+            work.top + (work.bottom - work.top - h) / 2,
+        ),
+        Placement::At(x, y) => (x, y),
+    };
+    let x = x.min(work.right - w).max(work.left);
+    let y = y.min(work.bottom - h).max(work.top);
+    // SAFETY: `hwnd` é esta janela; só posição e tamanho mudam.
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    let c = ctx.controls.get();
+    let v = layout.viewport;
+    // SAFETY: `c.content` é filha desta janela.
+    unsafe {
+        let _ = SetWindowPos(
+            c.content,
+            None,
+            v.left,
+            v.top,
+            v.right - v.left,
+            v.bottom - v.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    let max = duplicata_core::settings_layout::max_scroll(v.bottom - v.top, layout.content_height);
+    ctx.scroll.set(ctx.scroll.get().min(max));
+    place_children(ctx);
+    content::update_scrollbar(ctx);
+    redraw_all(ctx);
+}
+
+/// Posiciona os controles da área de conteúdo (descontada a rolagem) e os
+/// do rodapé.
+fn place_children(ctx: &SettingsCtx) {
+    let l = ctx.layout.get();
+    let c = ctx.controls.get();
+    let (line, dpi) = {
+        let look = ctx.look.borrow();
+        (look.line_height, look.dpi)
+    };
+    let s = ctx.scroll.get();
+    let shift = |r: CoreRect| CoreRect {
+        top: r.top - s,
+        bottom: r.bottom - s,
+        ..r
+    };
+    let place = |h: HWND, r: CoreRect| {
+        // SAFETY: `h` é filho desta janela, desta thread.
+        unsafe {
+            let _ = SetWindowPos(
+                h,
+                None,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    };
+    place(c.alter, shift(l.alter_button));
+    place(c.startup, shift(l.toggles[0]));
+    place(c.secrets, shift(l.toggles[1]));
+    place(c.protection, shift(l.toggles[2]));
+    for (i, (edit, _)) in c.numeric().into_iter().enumerate() {
+        place(edit, shift(field_inner(l.numeric_edits[i], line, dpi)));
+    }
+    place(c.list, shift(list_inner(l.list, dpi)));
+    place(c.list_edit, shift(field_inner(l.list_edit, line, dpi)));
+    place(c.add, shift(l.add_button));
+    place(c.remove, shift(l.remove_button));
+    place(c.save, l.footer[0]);
+    place(c.cancel, l.footer[1]);
+    place(c.apply, l.footer[2]);
+}
+
+fn redraw_all(ctx: &SettingsCtx) {
+    // SAFETY: `hwnd` é esta janela; invalida ela e todos os filhos.
+    unsafe {
+        let _ = RedrawWindow(
+            Some(ctx.hwnd.get()),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        );
+    }
+}
+
+fn reload_look(ctx: &SettingsCtx, dpi: u32) {
+    hide_tooltip(ctx);
+    let old = ctx.look.replace(Look::load(dpi));
+    controls::set_colors(ctx.look.borrow().colors);
+    let dark = ctx.look.borrow().dark;
+    // SAFETY: `hwnd` é esta janela, desta thread.
+    unsafe {
+        let _ = window_material::apply_attributes(ctx.hwnd.get(), dark);
+    }
+    apply_fonts(ctx);
+    old.release();
+    apply_control_themes(ctx);
+}
+
 /// # Safety
-/// `edit` deve ser um `HWND` de EDIT válido.
-unsafe fn edit_text_of(edit: HWND) -> String {
-    // SAFETY: `edit` válido (contrato desta função).
+/// `edit` deve ser um controle válido.
+unsafe fn window_text(edit: HWND) -> String {
+    // SAFETY: `edit` válido (contrato).
     let len = unsafe { SendMessageW(edit, WM_GETTEXTLENGTH, None, None) }.0 as usize;
     if len == 0 {
         return String::new();
     }
     let mut buf = vec![0u16; len + 1];
-    // SAFETY: `buf` tem capacidade `len + 1` (espaço para o NUL que
-    // `WM_GETTEXT` sempre escreve); `wParam` informa essa capacidade.
+    // SAFETY: `buf` tem espaço para o NUL que `WM_GETTEXT` escreve.
     unsafe {
         SendMessageW(
             edit,
@@ -731,308 +950,466 @@ unsafe fn edit_text_of(edit: HWND) -> String {
     String::from_utf16_lossy(&buf[..len])
 }
 
-/// # Safety
-/// `ctx.edit`/`ctx.listbox` devem ser `HWND`s válidos.
-unsafe fn add_from_edit(ctx: &SettingsDialogCtx) {
-    // SAFETY: contrato desta função.
-    let text = unsafe { edit_text_of(ctx.edit) };
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+/// Reescreve um campo sem que o `EN_CHANGE` conte como edição.
+fn write_field(ctx: &SettingsCtx, edit: HWND, value: &str) {
+    // SAFETY: `edit` é filho desta janela.
+    if unsafe { window_text(edit) } == value {
         return;
     }
-    let already_there = ctx
-        .config
-        .borrow()
-        .blocked_programs
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(trimmed));
-    if already_there {
-        return;
-    }
-    ctx.config
-        .borrow_mut()
-        .blocked_programs
-        .push(trimmed.to_string());
-    let _ = ctx.config.borrow().persist(&ctx.config_path);
-
-    // SAFETY: `ctx.edit` válido — limpa o campo depois de adicionar de verdade.
+    let w = wide(value);
+    ctx.writing_fields.set(true);
+    // SAFETY: `edit` válido; `w` NUL-terminado e vivo durante a chamada.
     unsafe {
-        let _ = SendMessageW(ctx.edit, WM_SETTEXT, None, Some(LPARAM(0)));
+        SendMessageW(edit, WM_SETTEXT, None, Some(LPARAM(w.as_ptr() as isize)));
     }
-    // SAFETY: `ctx.listbox` válido.
-    unsafe { refresh_listbox(ctx) };
+    ctx.writing_fields.set(false);
 }
 
-/// # Safety
-/// `ctx.listbox` deve ser um `HWND` de LISTBOX válido.
-unsafe fn remove_selected(ctx: &SettingsDialogCtx) {
-    // SAFETY: `ctx.listbox` válido (contrato desta função). `LB_GETCURSEL`
-    // devolve -1 se nada estiver selecionado.
-    let index = unsafe { SendMessageW(ctx.listbox, LB_GETCURSEL, None, None) }.0 as i32;
-    if index < 0 {
-        return;
-    }
-    let mut cfg = ctx.config.borrow_mut();
-    if (index as usize) < cfg.blocked_programs.len() {
-        cfg.blocked_programs.remove(index as usize);
-    }
-    drop(cfg);
-    let _ = ctx.config.borrow().persist(&ctx.config_path); // best-effort
-                                                           // SAFETY: `ctx.listbox` válido.
-    unsafe { refresh_listbox(ctx) };
-}
-
-/// # Safety
-/// `ctx.heuristic_checkbox` deve ser um `HWND` de `BUTTON` válido.
-unsafe fn toggle_heuristic(ctx: &SettingsDialogCtx) {
-    // SAFETY: `ctx.heuristic_checkbox` válido (contrato desta função).
-    let checked = unsafe { SendMessageW(ctx.heuristic_checkbox, BM_GETCHECK, None, None) }.0
-        as usize
-        == BST_CHECKED;
-    ctx.config.borrow_mut().heuristic_secret_detection = checked;
-    let _ = ctx.config.borrow().persist(&ctx.config_path);
-}
-
-/// # Safety
-/// `ctx.encryption_checkbox` deve ser um `HWND` de `BUTTON` válido e
-/// `ctx.history_hwnd` a janela de histórico.
-unsafe fn toggle_encryption(ctx: &SettingsDialogCtx) {
-    // SAFETY: `ctx.encryption_checkbox` válido (contrato desta função).
-    let enable = unsafe { SendMessageW(ctx.encryption_checkbox, BM_GETCHECK, None, None) }.0
-        as usize
-        == BST_CHECKED;
-    ctx.config.borrow_mut().encryption_enabled = enable;
-    // SAFETY: `ctx.history_hwnd` é a janela de histórico, na mesma thread;
-    // `SendMessageW` entrega o `WM_APP_TOGGLE_ENCRYPTION` sincronamente.
+fn set_check(h: HWND, on: bool) {
+    // SAFETY: `h` é uma alternância desta janela.
     unsafe {
-        SendMessageW(
-            ctx.history_hwnd,
-            crate::history_window::WM_APP_TOGGLE_ENCRYPTION,
-            Some(WPARAM(enable as usize)),
-            None,
-        );
+        SendMessageW(h, BM_SETCHECK, Some(WPARAM(on as usize)), None);
     }
 }
 
-/// # Safety
-/// `ctx.startup_checkbox`/`ctx.startup_status` devem ser `HWND`s válidos.
-unsafe fn toggle_startup(ctx: &SettingsDialogCtx) {
-    // SAFETY: `ctx.startup_checkbox` válido (contrato desta função).
-    let checked = unsafe { SendMessageW(ctx.startup_checkbox, BM_GETCHECK, None, None) }.0 as usize
-        == BST_CHECKED;
-    if checked {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(path) = exe.to_str() {
-                let _ = startup_registry::write_run_entry(path);
-            }
-        }
-        let _ = startup_registry::clear_startup_approval();
-    } else {
-        let _ = startup_registry::remove_run_entry();
-    }
-    // SAFETY: contrato desta função.
-    unsafe { refresh_startup_status(ctx) };
+fn is_checked(h: HWND) -> bool {
+    // SAFETY: `h` é uma alternância desta janela.
+    unsafe { SendMessageW(h, BM_GETCHECK, None, None) }.0 != 0
 }
 
-/// # Safety
-/// `ctx.retention_days_edit`/`ctx.max_items_edit`/`ctx.max_pinned_edit` devem
-/// ser `HWND`s de EDIT válidos.
-unsafe fn apply_retention(ctx: &SettingsDialogCtx) {
-    // SAFETY: contrato desta função.
-    let (days_text, items_text, pinned_text) = unsafe {
+fn sync_controls(ctx: &SettingsCtx) {
+    sync_toggles(ctx);
+    sync_fields(ctx);
+    sync_list(ctx);
+}
+
+fn sync_toggles(ctx: &SettingsCtx) {
+    let c = ctx.controls.get();
+    let (startup, secrets, protection, busy) = {
+        let s = ctx.session.borrow();
+        let d = s.draft();
         (
-            edit_text_of(ctx.retention_days_edit),
-            edit_text_of(ctx.max_items_edit),
-            edit_text_of(ctx.max_pinned_edit),
+            d.startup,
+            d.secret_detection,
+            d.protection,
+            s.protection_busy(),
         )
     };
-
-    let (days, max_items, max_pinned) = {
-        let cfg = ctx.config.borrow();
-        let current_days = cfg.retention.as_secs() / 86_400;
-        let days = days_text
-            .trim()
-            .parse::<u64>()
-            .unwrap_or(current_days)
-            .max(MIN_RETENTION_DAYS);
-        let max_items = items_text
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(cfg.max_items)
-            .max(MIN_MAX_ITEMS);
-        let max_pinned = pinned_text
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(cfg.max_pinned)
-            .min(MAX_MAX_PINNED);
-        (days, max_items, max_pinned)
-    };
-
-    {
-        let mut cfg = ctx.config.borrow_mut();
-        cfg.retention = Duration::from_secs(days * 86_400);
-        cfg.max_items = max_items;
-        cfg.max_pinned = max_pinned;
+    set_check(c.startup, startup);
+    set_check(c.secrets, secrets);
+    set_check(c.protection, protection);
+    // SAFETY: `c.protection` é desta janela.
+    unsafe {
+        let _ = EnableWindow(c.protection, !busy);
     }
-    let _ = ctx.config.borrow().persist(&ctx.config_path);
+    invalidate_content(ctx);
+}
 
-    // Reescreve os campos com o valor efetivo (o usuário vê o ajuste ao piso).
-    // SAFETY: contrato desta função.
-    unsafe { refresh_retention_edits(ctx) };
+fn sync_fields(ctx: &SettingsCtx) {
+    let c = ctx.controls.get();
+    for (edit, field) in c.numeric() {
+        let value = ctx.session.borrow().numeric_text(field).to_string();
+        write_field(ctx, edit, &value);
+    }
+}
 
-    let now_ms = SystemTime::now()
+fn sync_list(ctx: &SettingsCtx) {
+    let list = ctx.controls.get().list;
+    let names = ctx.session.borrow().draft().blocked_programs.clone();
+    // SAFETY: `list` é a LISTBOX desta janela; cada `w` vive durante a
+    // chamada síncrona.
+    unsafe {
+        SendMessageW(list, LB_RESETCONTENT, None, None);
+        for name in names {
+            let w = wide(&name);
+            SendMessageW(list, LB_ADDSTRING, None, Some(LPARAM(w.as_ptr() as isize)));
+        }
+    }
+}
+
+fn refresh_apply(ctx: &SettingsCtx) {
+    let c = ctx.controls.get();
+    let can = ctx.session.borrow().can_apply();
+    // SAFETY: `c.apply`/`c.save` são desta janela; o foco não fica num botão
+    // desabilitado.
+    unsafe {
+        if !can && GetFocus() == c.apply {
+            let _ = SetFocus(Some(c.save));
+        }
+        let _ = EnableWindow(c.apply, can);
+    }
+}
+
+fn refresh_hotkey_line(ctx: &SettingsCtx) {
+    let owner = hotkey_capture::owner();
+    let armed = hotkey_capture::is_armed() && owner == CaptureOwner::SettingsSection;
+    let view = ctx.session.borrow().hotkey_line(
+        ctx.registered_hotkey.get(),
+        armed,
+        owner == CaptureOwner::StandaloneDialog,
+    );
+    let alter = ctx.controls.get().alter;
+    // SAFETY: `alter` é desta janela.
+    unsafe {
+        let _ = EnableWindow(alter, view.alter_enabled);
+    }
+    *ctx.hotkey_view.borrow_mut() = view;
+    invalidate_content(ctx);
+}
+
+fn invalidate_content(ctx: &SettingsCtx) {
+    // SAFETY: `content` é desta janela (ou nula antes de criada: no-op).
+    unsafe {
+        let _ = InvalidateRect(Some(ctx.controls.get().content), None, false);
+    }
+}
+
+fn hide_tooltip(ctx: &SettingsCtx) {
+    if let Some(t) = ctx.tooltip.borrow().as_ref() {
+        t.hide();
+    }
+}
+
+/// Rola até o controle com o foco, se ele estiver na área de conteúdo.
+fn reveal_focus(ctx: &SettingsCtx) {
+    let c = ctx.controls.get();
+    // SAFETY: só consulta o foco desta thread.
+    let focus = unsafe { GetFocus() };
+    if focus == ctx.last_focus.get() {
+        return;
+    }
+    ctx.last_focus.set(focus);
+    // SAFETY: `IsChild` só consulta.
+    if focus.is_invalid() || !unsafe { IsChild(c.content, focus) }.as_bool() {
+        return;
+    }
+    content::reveal(ctx, focus);
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    ctx.queue.push(
-        WorkItem::ApplySettings {
-            now_ms,
-            retention_ms: days.saturating_mul(86_400_000),
-            max_items,
-            max_pinned,
-        },
-        0,
-    );
+        .unwrap_or(0)
 }
 
-/// # Safety
-/// `ctx.hotkey_status`/`ctx.hotkey_alter` devem ser HWNDs válidos.
-unsafe fn refresh_hotkey_status(ctx: &SettingsDialogCtx) {
-    if hotkey_capture::owner() == CaptureOwner::StandaloneDialog {
-        // O diálogo autônomo de conflito detém a captura — a seção
-        // fica inativa, com o motivo E o caminho para resolver (não só "não
-        // dá aqui").
-        // SAFETY: contrato desta função.
-        unsafe {
-            set_edit_text(
-                ctx.hotkey_status,
-                "A configuração de atalho já está aberta na janela de conflito — resolva-a \
-                 ali (ela permanece sempre visível, no topo da tela).",
-            );
-            let _ = EnableWindow(ctx.hotkey_alter, false);
+/// Executa os efeitos na ordem. Empréstimos curtos: nenhum atravessa um
+/// `SendMessageW`. Na falha da troca do atalho, a direção é a do núcleo: no
+/// Aplicar/Salvar a anterior continua; no Cancelar nenhuma fica (como na
+/// inicialização quando o registro falha).
+fn execute(ctx: &SettingsCtx, effects: &[Effect], mode: Mode) -> SaveReport {
+    let mut report = SaveReport::default();
+    let mut push_settings = false;
+    for effect in effects {
+        match effect {
+            Effect::SwapHotkey { to, .. } => {
+                let on_failure = if mode == Mode::Cancel {
+                    OnSwapFailure::LeaveNone
+                } else {
+                    OnSwapFailure::KeepPrevious
+                };
+                let registered = ctx.registered_hotkey.get();
+                match hotkey_dialog::swap_hotkey(ctx.history_hwnd, registered, *to, on_failure) {
+                    Ok(()) => {
+                        ctx.registered_hotkey.set(Some(*to));
+                        ctx.config.borrow_mut().hotkey = *to;
+                    }
+                    Err(_) if mode == Mode::Cancel => {
+                        ctx.registered_hotkey.set(None);
+                        ctx.config.borrow_mut().hotkey = *to;
+                    }
+                    Err(_) => {
+                        report.hotkey_failed = true;
+                        if mode == Mode::Apply {
+                            ctx.session.borrow_mut().hotkey_effect_failed();
+                        }
+                    }
+                }
+            }
+            Effect::SetStartup {
+                enable,
+                clear_block,
+            } => {
+                // Falha no registro fica no log; a janela segue (como antes).
+                if *enable {
+                    let written = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.to_str().map(str::to_string))
+                        .is_some_and(|path| startup_registry::write_run_entry(&path));
+                    if !written {
+                        log_event!(Level::WARN, LogFields::new("startup_entry_write_failed"));
+                    }
+                    if *clear_block && !startup_registry::clear_startup_approval() {
+                        log_event!(Level::WARN, LogFields::new("startup_approval_clear_failed"));
+                    }
+                } else if !startup_registry::remove_run_entry() {
+                    log_event!(Level::WARN, LogFields::new("startup_entry_remove_failed"));
+                }
+            }
+            Effect::SetCaptureFilters {
+                blocked_programs,
+                secret_detection,
+            } => {
+                {
+                    let mut cfg = ctx.config.borrow_mut();
+                    cfg.blocked_programs = blocked_programs.clone();
+                    cfg.heuristic_secret_detection = *secret_detection;
+                }
+                ctx.queue.push(
+                    WorkItem::SetSecretDetection {
+                        enabled: *secret_detection,
+                    },
+                    0,
+                );
+            }
+            Effect::SetRetention { days, max_items } => {
+                let mut cfg = ctx.config.borrow_mut();
+                cfg.retention = std::time::Duration::from_secs(u64::from(*days) * 86_400);
+                cfg.max_items = *max_items;
+                push_settings = true;
+            }
+            Effect::SetMaxPinned(n) => {
+                ctx.config.borrow_mut().max_pinned = *n;
+                // SAFETY: Histórico desta thread; entrega síncrona.
+                unsafe {
+                    SendMessageW(
+                        ctx.history_hwnd,
+                        WM_APP_SET_MAX_PINNED,
+                        Some(WPARAM(*n as usize)),
+                        None,
+                    );
+                }
+                push_settings = true;
+            }
+            Effect::ToggleProtection(on) => {
+                ctx.config.borrow_mut().encryption_enabled = *on;
+                // SAFETY: Histórico desta thread; a reescrita segue pela
+                // worker e o fim chega por `on_protection_finished`.
+                unsafe {
+                    SendMessageW(
+                        ctx.history_hwnd,
+                        WM_APP_TOGGLE_ENCRYPTION,
+                        Some(WPARAM(*on as usize)),
+                        None,
+                    );
+                }
+            }
+            Effect::Persist => {
+                ctx.session
+                    .borrow()
+                    .in_effect()
+                    .write_into(&mut ctx.config.borrow_mut());
+                report.persist_failed = ctx.config.borrow().persist(&ctx.config_path).is_err();
+            }
         }
-        return;
     }
-    // SAFETY: contrato desta função.
-    unsafe {
-        let _ = EnableWindow(ctx.hotkey_alter, true);
-    }
-
-    if hotkey_capture::is_armed() {
-        // Estado armado visualmente indicado.
-        // SAFETY: contrato desta função.
-        unsafe {
-            set_edit_text(
-                ctx.hotkey_status,
-                "Pressione a nova combinação de teclas... Esc cancela.",
-            );
-        }
-        return;
-    }
-
-    let text = match ctx.registered_hotkey.get() {
-        Some(combo) => format_hotkey(&combo),
-        None => format!(
-            "Nenhum atalho está ativo. A combinação configurada, \"{}\", não pôde ser registrada.",
-            format_hotkey(&ctx.config.borrow().hotkey)
-        ),
-    };
-    // SAFETY: contrato desta função.
-    unsafe { set_edit_text(ctx.hotkey_status, &text) };
-}
-
-/// # Safety
-/// `ctx.hotkey_alter`/`ctx.hotkey_status` devem ser HWNDs válidos.
-unsafe fn on_hotkey_alter_clicked(ctx: &SettingsDialogCtx) {
-    if hotkey_capture::owner() == CaptureOwner::StandaloneDialog {
-        return;
-    }
-    if !hotkey_capture::is_armed() {
-        hotkey_capture::arm(CaptureOwner::SettingsSection);
-    }
-    // SAFETY: contrato desta função.
-    unsafe {
-        let _ = SetFocus(Some(ctx.hotkey_alter));
-        refresh_hotkey_status(ctx);
-    }
-}
-
-/// # Safety
-/// `ctx.startup_checkbox`/`ctx.startup_status` devem ser `HWND`s válidos.
-unsafe fn refresh_startup_status(ctx: &SettingsDialogCtx) {
-    let entry_present = startup_registry::run_entry_present();
-    let approval_raw = startup_registry::read_startup_approved_raw();
-    let approval = interpret_approval(approval_raw.as_deref());
-    let state = startup_state(entry_present, approval);
-
-    let checked = matches!(state, StartupState::Ligado);
-    // SAFETY: `ctx.startup_checkbox` válido (contrato desta função).
-    unsafe {
-        SendMessageW(
-            ctx.startup_checkbox,
-            BM_SETCHECK,
-            Some(WPARAM(if checked { BST_CHECKED } else { BST_UNCHECKED })),
-            None,
+    if push_settings {
+        let cfg = ctx.config.borrow();
+        ctx.queue.push(
+            WorkItem::ApplySettings {
+                now_ms: now_ms(),
+                retention_ms: cfg.retention.as_millis() as u64,
+                max_items: cfg.max_items,
+                max_pinned: cfg.max_pinned,
+            },
+            0,
         );
     }
+    report
+}
 
-    // SAFETY: `ctx.startup_status` válido (contrato desta função).
+fn on_apply(ctx: &SettingsCtx) {
+    if !ctx.session.borrow().can_apply() {
+        return;
+    }
+    let effects = ctx.session.borrow_mut().apply();
+    execute(ctx, &effects, Mode::Apply);
+    sync_fields(ctx);
+    refresh_hotkey_line(ctx);
+    refresh_apply(ctx);
+}
+
+fn cancel(hwnd: HWND, ctx: &SettingsCtx) {
+    let effects = ctx.session.borrow_mut().cancel();
+    execute(ctx, &effects, Mode::Cancel);
+    // SAFETY: `hwnd` é esta janela. Depois desta linha `ctx` não é mais
+    // tocado: o `WM_NCDESTROY` solta o contexto dentro do `DestroyWindow`.
     unsafe {
-        match state {
-            StartupState::DesligadoPeloGerenciador => {
-                set_edit_text(ctx.startup_status, STARTUP_DISAPPROVED_TEXT);
-                let _ = ShowWindow(ctx.startup_status, SW_SHOW);
-            }
-            StartupState::Ligado | StartupState::Desligado => {
-                let _ = ShowWindow(ctx.startup_status, SW_HIDE);
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+fn on_save(hwnd: HWND, ctx: &SettingsCtx) {
+    let step = ctx.session.borrow_mut().begin_save();
+    // Os campos mostram o ajustado; o Aplicar segue o que sobrou pendente.
+    sync_fields(ctx);
+    refresh_apply(ctx);
+    match step {
+        SaveStep::Proceed(effects) => finish_save(hwnd, ctx, &effects),
+        SaveStep::Confirm(lines) => {
+            let (font, dpi) = {
+                let look = ctx.look.borrow();
+                (look.font, look.dpi)
+            };
+            hide_tooltip(ctx);
+            if let Some(confirm) = confirm::open(hwnd, lines, font, dpi) {
+                ctx.confirm.set(Some(confirm));
+                // SAFETY: `hwnd` é esta janela; a confirmação reabilita antes
+                // de se destruir.
+                unsafe {
+                    let _ = EnableWindow(hwnd, false);
+                }
             }
         }
     }
 }
 
-/// # Safety
-/// `ctx.hotkey_status` deve ser um HWND válido; `ctx.dialog_hwnd` deve ser a
-/// janela de Configurações já criada.
-unsafe fn handle_hotkey_keydown(ctx: &SettingsDialogCtx, wparam: WPARAM) {
+fn finish_save(hwnd: HWND, ctx: &SettingsCtx, effects: &[Effect]) {
+    let report = execute(ctx, effects, Mode::Save);
+    let outcome = ctx.session.borrow_mut().finish_save(report);
+    match outcome {
+        SaveOutcome::Close => {}
+        SaveOutcome::StayOpen { error_line } => {
+            ctx.error_line.set(error_line);
+            sync_toggles(ctx);
+            refresh_hotkey_line(ctx);
+            refresh_apply(ctx);
+            redraw_all(ctx);
+            return;
+        }
+    }
+    // SAFETY: `hwnd` é esta janela; `ctx` não é tocado depois.
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+fn on_confirm_result(hwnd: HWND, ctx: &SettingsCtx, confirmed: bool) {
+    ctx.confirm.set(None);
+    // SAFETY: `hwnd` é esta janela (a confirmação já a reabilitou).
+    unsafe {
+        let _ = EnableWindow(hwnd, true);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    if confirmed {
+        let effects = ctx.session.borrow_mut().confirm_save();
+        finish_save(hwnd, ctx, &effects);
+    } else {
+        ctx.session.borrow_mut().back();
+        refresh_apply(ctx);
+        // SAFETY: `hwnd` é esta janela, de volta ao primeiro plano.
+        unsafe {
+            let _ = SetFocus(Some(ctx.controls.get().save));
+        }
+    }
+}
+
+fn on_numeric_change(ctx: &SettingsCtx, edit: HWND, field: NumericField) {
+    if ctx.writing_fields.get() {
+        return;
+    }
+    // SAFETY: `edit` é um campo desta janela.
+    let typed = unsafe { window_text(edit) };
+    let digits = duplicata_core::settings_input::digits_only(&typed);
+    if digits != typed {
+        // Colagem com letras: o campo fica só com os dígitos.
+        write_field(ctx, edit, &digits);
+        let end = digits.encode_utf16().count();
+        // SAFETY: `edit` válido; cursor no fim do texto.
+        unsafe {
+            SendMessageW(
+                edit,
+                EM_SETSEL,
+                Some(WPARAM(end)),
+                Some(LPARAM(end as isize)),
+            );
+        }
+    }
+    ctx.session.borrow_mut().set_numeric_text(field, &digits);
+    refresh_apply(ctx);
+}
+
+fn on_add(ctx: &SettingsCtx) {
+    let c = ctx.controls.get();
+    // SAFETY: `c.list_edit` é desta janela.
+    let typed = unsafe { window_text(c.list_edit) };
+    if ctx.session.borrow_mut().add_program(&typed) {
+        write_field(ctx, c.list_edit, "");
+        sync_list(ctx);
+        refresh_apply(ctx);
+    }
+}
+
+fn on_remove(ctx: &SettingsCtx) {
+    let list = ctx.controls.get().list;
+    // SAFETY: `list` é a LISTBOX desta janela; -1 = nada selecionado.
+    let index = unsafe { SendMessageW(list, LB_GETCURSEL, None, None) }.0;
+    let selected = usize::try_from(index).ok();
+    if ctx.session.borrow_mut().remove_program(selected) {
+        sync_list(ctx);
+        refresh_apply(ctx);
+    }
+}
+
+fn on_alter(ctx: &SettingsCtx) {
+    if hotkey_capture::owner() == CaptureOwner::StandaloneDialog {
+        return;
+    }
+    hotkey_capture::arm(CaptureOwner::SettingsSection);
+    ctx.session.borrow_mut().hotkey_armed();
+    // SAFETY: `alter` é desta janela; o foco fica nele enquanto armado.
+    unsafe {
+        let _ = SetFocus(Some(ctx.controls.get().alter));
+    }
+    refresh_hotkey_line(ctx);
+}
+
+fn settings_armed() -> bool {
+    hotkey_capture::is_armed() && hotkey_capture::owner() == CaptureOwner::SettingsSection
+}
+
+fn disarm(ctx: &SettingsCtx) {
+    hotkey_capture::disarm();
+    ctx.session.borrow_mut().hotkey_disarmed();
+    refresh_hotkey_line(ctx);
+}
+
+fn on_hotkey_key(ctx: &SettingsCtx, wparam: WPARAM) {
     let vk = VIRTUAL_KEY(wparam.0 as u16);
     if matches!(vk, VK_CONTROL | VK_SHIFT | VK_MENU | VK_LWIN | VK_RWIN) {
         return;
     }
     if vk == VK_ESCAPE {
-        hotkey_capture::disarm();
-        // SAFETY: contrato desta função.
-        unsafe { refresh_hotkey_status(ctx) };
+        disarm(ctx);
         return;
     }
-
     let candidate = HotkeyCombo {
         modifiers: hotkey_dialog::current_modifiers(),
         vkey: vk.0 as u32,
     };
-    let outcome = hotkey_dialog::try_exchange(
-        ctx.dialog_hwnd,
-        ctx.history_hwnd,
-        ctx.registered_hotkey.get(),
-        candidate,
-        &ctx.config,
-        &ctx.config_path,
-    );
+    let registered = ctx.registered_hotkey.get();
+    let pending = ctx.session.borrow().has_pending_hotkey();
+    let outcome = if pending && registered == Some(candidate) {
+        // Voltar à combinação que já vale desfaz a pendente.
+        Ok(())
+    } else {
+        hotkey_dialog::probe_hotkey(ctx.hwnd.get(), registered, candidate)
+    };
     match outcome {
-        hotkey_dialog::ExchangeOutcome::Accepted(combo) => {
-            ctx.registered_hotkey.set(Some(combo));
+        Ok(()) => {
+            ctx.session.borrow_mut().set_pending_hotkey(candidate);
             hotkey_capture::disarm();
+            refresh_hotkey_line(ctx);
+            refresh_apply(ctx);
         }
-        hotkey_dialog::ExchangeOutcome::Refused { message } => {
-            // SAFETY: contrato desta função.
-            unsafe { set_edit_text(ctx.hotkey_status, &message) };
-            return;
+        Err(message) => {
+            ctx.session.borrow_mut().set_hotkey_message(message);
+            refresh_hotkey_line(ctx);
         }
     }
-    // SAFETY: contrato desta função.
-    unsafe { refresh_hotkey_status(ctx) };
 }
 
-unsafe extern "system" fn hotkey_alter_subclass(
+unsafe extern "system" fn alter_subclass(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
@@ -1040,44 +1417,133 @@ unsafe extern "system" fn hotkey_alter_subclass(
     uidsubclass: usize,
     dwrefdata: usize,
 ) -> LRESULT {
-    if msg == WM_NCDESTROY {
-        // Recomendação da própria Microsoft: remover o subclass ao ver
-        // WM_NCDESTROY, antes de repassar ao handler padrão.
-        // SAFETY: `hwnd`/`uidsubclass` identificam este mesmo subclass,
-        // instalado em `create_children`.
-        unsafe {
-            let _ = RemoveWindowSubclass(hwnd, Some(hotkey_alter_subclass), uidsubclass);
+    // SAFETY: `dwrefdata` é o `SettingsCtx` posto em `build`, vivo enquanto
+    // o botão existir (ver `build`).
+    let ctx = unsafe { (dwrefdata as *const SettingsCtx).as_ref() };
+    match (msg, ctx) {
+        (WM_NCDESTROY, _) => {
+            // SAFETY: `hwnd`/`uidsubclass` identificam este subclass.
+            unsafe {
+                let _ = RemoveWindowSubclass(hwnd, Some(alter_subclass), uidsubclass);
+            }
         }
-    } else if msg == WM_KEYDOWN && hotkey_capture::is_armed() {
-        let ctx_ptr = dwrefdata as *const SettingsDialogCtx;
-        // SAFETY: `dwrefdata` é o ponteiro posto por `create_children` — ver
-        // doc desta função sobre por que ele continua válido aqui.
-        if let Some(ctx) = unsafe { ctx_ptr.as_ref() } {
-            // SAFETY: `ctx.hotkey_status`/`ctx.dialog_hwnd` válidos (postos
-            // antes deste subclass ser instalado, na mesma `create_children`).
-            unsafe { handle_hotkey_keydown(ctx, wparam) };
+        (WM_GETDLGCODE, Some(_)) if settings_armed() => {
+            // Armado, todas as teclas vêm para cá: Tab e Esc também.
+            return LRESULT(windows::Win32::UI::WindowsAndMessaging::DLGC_WANTALLKEYS as isize);
         }
-        return LRESULT(0);
+        (WM_KEYDOWN | WM_SYSKEYDOWN, Some(ctx)) if settings_armed() => {
+            on_hotkey_key(ctx, wparam);
+            return LRESULT(0);
+        }
+        (WM_KILLFOCUS, Some(ctx)) if settings_armed() => {
+            disarm(ctx);
+        }
+        _ => {}
     }
     // SAFETY: repassa ao handler padrão do subclass.
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
-fn ctx_ref(hwnd: HWND) -> Option<&'static mut SettingsDialogCtx> {
-    // SAFETY: `GWLP_USERDATA` guarda o `*mut SettingsDialogCtx` posto em
-    // `WM_NCCREATE`; o ponteiro é válido até `WM_NCDESTROY`, que o desaloca.
-    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SettingsDialogCtx;
-    // SAFETY: `ptr` ou é nulo ou aponta para o `SettingsDialogCtx` posto
-    // acima — `as_mut()` trata nulo como `None` corretamente.
-    unsafe { ptr.as_mut() }
+fn on_command(hwnd: HWND, ctx: &SettingsCtx, wparam: WPARAM) {
+    let id = (wparam.0 & 0xFFFF) as i32;
+    let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
+    let c = ctx.controls.get();
+    if code == EN_CHANGE {
+        let [retention, items, pinned] = c.numeric();
+        let target = match id {
+            ID_RETENTION => Some(retention),
+            ID_MAX_ITEMS => Some(items),
+            ID_MAX_PINNED => Some(pinned),
+            _ => None,
+        };
+        if let Some((edit, field)) = target {
+            on_numeric_change(ctx, edit, field);
+        }
+        return;
+    }
+    if code != BN_CLICKED || wparam.0 & 0xFFFF == IDOK {
+        return;
+    }
+    match id {
+        ID_ALTER => on_alter(ctx),
+        ID_STARTUP => {
+            ctx.session.borrow_mut().set_startup(is_checked(c.startup));
+            refresh_apply(ctx);
+        }
+        ID_SECRETS => {
+            ctx.session
+                .borrow_mut()
+                .set_secret_detection(is_checked(c.secrets));
+            refresh_apply(ctx);
+        }
+        ID_PROTECTION => {
+            ctx.session
+                .borrow_mut()
+                .set_protection(is_checked(c.protection));
+            sync_toggles(ctx);
+            refresh_apply(ctx);
+        }
+        ID_ADD => on_add(ctx),
+        ID_REMOVE => on_remove(ctx),
+        ID_APPLY => on_apply(ctx),
+        ID_SAVE => on_save(hwnd, ctx),
+        ID_CANCEL => cancel(hwnd, ctx),
+        _ => {}
+    }
+}
+
+fn paint(hwnd: HWND, ctx: &SettingsCtx) {
+    let l = ctx.layout.get();
+    let mut ps = PAINTSTRUCT::default();
+    // SAFETY: par `BeginPaint`/`EndPaint` no `WM_PAINT`; o pincel do tema
+    // vive no `Look`; a fonte anterior volta antes do `EndPaint`.
+    unsafe {
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let look = ctx.look.borrow();
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        FillRect(hdc, &client, look.surface_brush);
+        let line = RECT {
+            left: 0,
+            top: l.viewport.bottom,
+            right: client.right,
+            bottom: l.viewport.bottom + 1,
+        };
+        fill(hdc, &line, look.palette.border);
+        if let Some(message) = ctx.error_line.get() {
+            let old = SelectObject(hdc, HGDIOBJ(look.font.0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, look.palette.text_primary);
+            let mut buf: Vec<u16> = message.encode_utf16().collect();
+            let mut rc = win_rect(l.error_line);
+            DrawTextW(
+                hdc,
+                &mut buf,
+                &mut rc,
+                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            SelectObject(hdc, old);
+        }
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// # Safety
+/// `hdc` válido.
+unsafe fn fill(hdc: HDC, r: &RECT, color: COLORREF) {
+    // SAFETY: pincel criado e apagado aqui; `hdc` válido (contrato).
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        FillRect(hdc, r, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_NCCREATE => {
             // SAFETY: no WM_NCCREATE, `lParam` aponta para um CREATESTRUCTW
-            // cujo `lpCreateParams` é o `*mut SettingsDialogCtx` de `open()`
-            // (mesmo padrão de `history_window.rs`/`hotkey_dialog.rs`).
+            // cujo `lpCreateParams` é o `*mut SettingsCtx` de `open()`.
             unsafe {
                 let cs = &*(lparam.0 as *const CREATESTRUCTW);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
@@ -1085,88 +1551,127 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
         }
         WM_CREATE => {
-            // Adota o tema do Windows na ABERTURA — só a
-            // barra de título / frame; não repinta ao vivo (limitação conhecida
-            // aceita: o diálogo pode ficar aberto por minutos editando a
-            // denylist durante uma troca de tema).
-            // SAFETY: dentro do próprio WM_CREATE de `hwnd`.
-            unsafe {
-                crate::window_material::apply_dark_titlebar(
-                    hwnd,
-                    crate::system_appearance::SystemAppearance::read_dark(),
-                );
-            }
-            if let Some(ctx) = ctx_ref(hwnd) {
+            if let Some(ctx) = ctx_of(hwnd) {
                 // SAFETY: dentro do próprio WM_CREATE de `hwnd`.
-                unsafe { create_children(hwnd, ctx) };
+                unsafe { build(hwnd, ctx) };
+            }
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                paint(hwnd, ctx);
             }
             LRESULT(0)
         }
         WM_COMMAND => {
-            let id = wparam.0 & 0xFFFF;
-            if let Some(ctx) = ctx_ref(hwnd) {
-                if id == ID_ADD {
-                    // SAFETY: `ctx` válido (obtido acima); controles filhos já
-                    // criados (só chegamos em WM_COMMAND depois de WM_CREATE).
-                    unsafe { add_from_edit(ctx) };
-                } else if id == ID_REMOVE {
-                    // SAFETY: idem.
-                    unsafe { remove_selected(ctx) };
-                } else if id == ID_HEURISTIC_TOGGLE {
-                    // SAFETY: idem.
-                    unsafe { toggle_heuristic(ctx) };
-                } else if id == ID_APPLY_RETENTION {
-                    // SAFETY: idem — os EDIT de retenção já criados em WM_CREATE.
-                    unsafe { apply_retention(ctx) };
-                } else if id == ID_ENCRYPTION_TOGGLE {
-                    // SAFETY: idem — o checkbox da proteção já criado.
-                    unsafe { toggle_encryption(ctx) };
-                } else if id == ID_STARTUP_TOGGLE {
-                    // SAFETY: idem — o checkbox de inicialização já criado.
-                    unsafe { toggle_startup(ctx) };
-                } else if id == ID_HOTKEY_ALTER {
-                    // SAFETY: idem — a seção "Atalho global" já criada.
-                    unsafe { on_hotkey_alter_clicked(ctx) };
+            if let Some(ctx) = ctx_of(hwnd) {
+                on_command(hwnd, ctx, wparam);
+            }
+            LRESULT(0)
+        }
+        WM_DRAWITEM => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                let font = ctx.look.borrow().font;
+                // SAFETY: num `WM_DRAWITEM`, `lParam` aponta para o
+                // `DRAWITEMSTRUCT` do botão, válido durante o handler.
+                unsafe { controls::draw_button(&*(lparam.0 as *const DRAWITEMSTRUCT), font) };
+            }
+            LRESULT(1)
+        }
+        WM_MOUSEWHEEL => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                content::wheel(ctx, wparam);
+            }
+            LRESULT(0)
+        }
+        WM_ACTIVATE => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+                    hide_tooltip(ctx);
+                    // SAFETY: só consulta o foco desta thread.
+                    let focus = unsafe { GetFocus() };
+                    if !focus.is_invalid() {
+                        ctx.last_focus.set(focus);
+                    }
+                } else {
+                    let target = ctx.last_focus.get();
+                    // SAFETY: `IsChild` só consulta; o foco volta ao último
+                    // controle desta janela, ou ao primeiro.
+                    unsafe {
+                        let target = if IsChild(hwnd, target).as_bool() {
+                            target
+                        } else {
+                            ctx.controls.get().alter
+                        };
+                        let _ = SetFocus(Some(target));
+                    }
                 }
             }
             LRESULT(0)
         }
-        WM_KEYDOWN => {
-            if wparam.0 as u16 == VK_ESCAPE.0 {
-                // SAFETY: `hwnd` é o desta janela.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
+        WM_THEMECHANGED => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                let dpi = ctx.look.borrow().dpi;
+                reload_look(ctx, dpi);
+                redraw_all(ctx);
+            }
+            LRESULT(0)
+        }
+        WM_SETTINGCHANGE => {
+            if system_appearance::is_immersive_color_set(lparam) {
+                if let Some(ctx) = ctx_of(hwnd) {
+                    let dpi = ctx.look.borrow().dpi;
+                    reload_look(ctx, dpi);
+                    redraw_all(ctx);
                 }
+            }
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                let dpi = ((wparam.0 >> 16) & 0xFFFF) as u32;
+                let at = if lparam.0 == 0 {
+                    let mut r = RECT::default();
+                    // SAFETY: `hwnd` válido; só escreve `r`.
+                    let _ = unsafe { GetWindowRect(hwnd, &mut r) };
+                    (r.left, r.top)
+                } else {
+                    // SAFETY: num `WM_DPICHANGED`, `lParam` aponta para o
+                    // `RECT` sugerido pelo SO, válido durante o handler.
+                    let r = unsafe { *(lparam.0 as *const RECT) };
+                    (r.left, r.top)
+                };
+                reload_look(ctx, if dpi == 0 { ctx.look.borrow().dpi } else { dpi });
+                relayout(ctx, Placement::At(at.0, at.1));
+            }
+            LRESULT(0)
+        }
+        WM_APP_CONFIRM_RESULT => {
+            if let Some(ctx) = ctx_of(hwnd) {
+                on_confirm_result(hwnd, ctx, wparam.0 != 0);
             }
             LRESULT(0)
         }
         WM_CLOSE => {
-            // Não-modal, sem estado não salvo (cada mudança já persiste
-            // imediatamente) — fechar é só destruir, mesmo padrão de
-            // `hotkey_dialog.rs`.
-            // SAFETY: `hwnd` é o desta janela.
-            unsafe {
-                let _ = DestroyWindow(hwnd);
+            if let Some(ctx) = ctx_of(hwnd) {
+                cancel(hwnd, ctx);
             }
             LRESULT(0)
         }
         WM_NCDESTROY => {
             hotkey_capture::release(CaptureOwner::SettingsSection);
-            // SAFETY: reconstrói e dropa o `Box` alocado em `open()` — nenhum
-            // código lê `GWLP_USERDATA` de novo depois desta mensagem.
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SettingsDialogCtx;
+            OPEN_HWND.with(|c| c.set(None));
+            // SAFETY: reconstrói e solta o `Box` de `open()`; zera o
+            // `GWLP_USERDATA` para que nada mais o leia.
+            let ptr = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *mut SettingsCtx;
             if !ptr.is_null() {
                 // SAFETY: `ptr` veio de `Box::into_raw` em `open()` e nunca
                 // foi liberado antes.
                 let ctx = unsafe { Box::from_raw(ptr) };
-                if ctx.font_owned {
-                    // SAFETY: `ctx.font` veio de `CreateFontIndirectW` em
-                    // `ui_font()` (`font_owned == true`); nenhum controle a usa
-                    // mais depois de a janela ser destruída.
-                    unsafe {
-                        let _ = DeleteObject(ctx.font.into());
-                    }
-                }
+                // A dica antes das fontes que ela empresta.
+                drop(ctx.tooltip.borrow_mut().take());
+                ctx.look.borrow().release();
                 drop(ctx);
             }
             // SAFETY: repassa ao handler padrão.
@@ -1175,4 +1680,100 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         // SAFETY: repassa mensagens não tratadas ao handler padrão.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+#[doc(hidden)]
+pub fn window() -> Option<HWND> {
+    open_window().map(|(hwnd, _)| hwnd)
+}
+
+/// Controle pelo id, na área de conteúdo ou no rodapé.
+#[doc(hidden)]
+pub fn control(id: i32) -> Option<HWND> {
+    let (hwnd, ctx) = open_window()?;
+    let content = ctx.controls.get().content;
+    // SAFETY: `GetDlgItem` só consulta a árvore de filhos.
+    unsafe {
+        GetDlgItem(Some(content), id)
+            .or_else(|_| GetDlgItem(Some(hwnd), id))
+            .ok()
+    }
+}
+
+/// Repinta agora e devolve os textos que a janela desenhou (títulos, nomes,
+/// descrições, combinação, unidade e a linha de erro).
+#[doc(hidden)]
+pub fn painted_texts() -> Vec<String> {
+    let Some((hwnd, ctx)) = open_window() else {
+        return Vec::new();
+    };
+    // SAFETY: `hwnd` é a janela viva; pinta de forma síncrona.
+    unsafe {
+        let _ = RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN,
+        );
+    }
+    let mut out = ctx.painted.borrow().clone();
+    if let Some(e) = ctx.error_line.get() {
+        out.push(e.to_string());
+    }
+    out
+}
+
+#[doc(hidden)]
+pub fn tooltip_text() -> Option<String> {
+    let (_, ctx) = open_window()?;
+    let tip = ctx.tooltip.borrow();
+    let tip = tip.as_ref()?;
+    tip.is_visible().then(|| tip.text())
+}
+
+/// Ponto no meio da linha `row`, nas coordenadas da área de conteúdo.
+#[doc(hidden)]
+pub fn row_point(row: usize) -> Option<POINT> {
+    let (_, ctx) = open_window()?;
+    let r = ctx.layout.get().rows.get(row)?.row;
+    Some(POINT {
+        x: (r.left + r.right) / 2,
+        y: (r.top + r.bottom) / 2 - ctx.scroll.get(),
+    })
+}
+
+#[doc(hidden)]
+pub fn is_dark() -> Option<bool> {
+    open_window().map(|(_, ctx)| ctx.look.borrow().dark)
+}
+
+#[doc(hidden)]
+pub fn current_dpi() -> Option<u32> {
+    open_window().map(|(_, ctx)| ctx.look.borrow().dpi)
+}
+
+#[doc(hidden)]
+pub fn scroll_position() -> Option<i32> {
+    open_window().map(|(_, ctx)| ctx.scroll.get())
+}
+
+#[doc(hidden)]
+pub fn hotkey_description() -> Option<String> {
+    open_window().map(|(_, ctx)| ctx.hotkey_view.borrow().description.clone())
+}
+
+#[doc(hidden)]
+pub fn confirm_window() -> Option<HWND> {
+    open_window().and_then(|(_, ctx)| ctx.confirm.get())
+}
+
+#[doc(hidden)]
+pub fn confirm_lines() -> Vec<String> {
+    confirm_window().map(confirm::lines).unwrap_or_default()
+}
+
+/// Fonte que a confirmação aberta usa para desenhar.
+#[doc(hidden)]
+pub fn confirm_font() -> Option<HFONT> {
+    confirm_window().and_then(confirm::font)
 }

@@ -77,6 +77,9 @@ pub fn run_worker(
             WorkItem::DeleteOne { clip_id, done } => {
                 let _ = done.send(repo.delete_one(clip_id));
             }
+            WorkItem::SetSecretDetection { enabled } => {
+                cfg.heuristic_secret_detection = enabled;
+            }
             WorkItem::ToggleEncryption {
                 enable,
                 progress,

@@ -87,6 +87,14 @@ const HINT_STRIP_PX: i32 = hint_strip::HINT_STRIP_PX;
 pub const WM_APP_TOGGLE_ENCRYPTION: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 10;
 const WM_TOGGLE_PROGRESS: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 11;
 const WM_TOGGLE_DONE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 12;
+/// `WPARAM` = teto de fixados novo (Aplicar/Salvar das Configurações).
+pub const WM_APP_SET_MAX_PINNED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 13;
+/// Responde se uma reescrita da proteção está em andamento e para onde.
+pub const WM_APP_QUERY_ENCRYPTION_TOGGLE: u32 =
+    windows::Win32::UI::WindowsAndMessaging::WM_APP + 14;
+pub const ENCRYPTION_TOGGLE_IDLE: isize = 0;
+pub const ENCRYPTION_TOGGLE_TO_OFF: isize = 1;
+pub const ENCRYPTION_TOGGLE_TO_ON: isize = 2;
 
 #[derive(Clone, Copy)]
 struct ToggleUi {
@@ -633,16 +641,6 @@ fn face_of(font: HFONT) -> String {
     let len = (len.max(0) as usize).min(name.len());
     let end = name[..len].iter().position(|&c| c == 0).unwrap_or(len);
     String::from_utf16_lossy(&name[..end])
-}
-
-fn is_immersive_color_set(lparam: LPARAM) -> bool {
-    if lparam.0 == 0 {
-        return false;
-    }
-    // SAFETY: num `WM_SETTINGCHANGE`, `lParam` ou é 0 ou aponta para uma
-    // string wide NUL-terminada fornecida pelo SO.
-    let s = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
-    s.map(|s| s == "ImmersiveColorSet").unwrap_or(false)
 }
 
 fn client_rect(hwnd: HWND) -> RECT {
@@ -1562,6 +1560,7 @@ fn on_toggle_progress(hwnd: HWND, ctx: &HistoryWindowCtx, count: u64) {
 
 fn on_toggle_done(hwnd: HWND, ctx: &HistoryWindowCtx, failed: bool) {
     ctx.toggle.set(None);
+    crate::settings_dialog::on_protection_finished();
     reopen_and_refresh(ctx);
     if failed {
         log_event!(
@@ -2511,7 +2510,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
-            if is_immersive_color_set(lparam) {
+            if system_appearance::is_immersive_color_set(lparam) {
                 if let Some(ctx) = ctx_ref(hwnd) {
                     reload_appearance(hwnd, ctx);
                 }
@@ -2597,6 +2596,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 start_encryption_toggle(hwnd, ctx, wparam.0 != 0);
             }
             LRESULT(0)
+        }
+        WM_APP_SET_MAX_PINNED => {
+            if let Some(ctx) = ctx_ref(hwnd) {
+                ctx.max_pinned
+                    .set(u32::try_from(wparam.0).unwrap_or(u32::MAX));
+            }
+            LRESULT(0)
+        }
+        WM_APP_QUERY_ENCRYPTION_TOGGLE => {
+            let state = match ctx_ref(hwnd).and_then(|ctx| ctx.toggle.get()) {
+                None => ENCRYPTION_TOGGLE_IDLE,
+                Some(t) if t.enable => ENCRYPTION_TOGGLE_TO_ON,
+                Some(_) => ENCRYPTION_TOGGLE_TO_OFF,
+            };
+            LRESULT(state)
         }
         WM_TOGGLE_PROGRESS => {
             if let Some(ctx) = ctx_ref(hwnd) {

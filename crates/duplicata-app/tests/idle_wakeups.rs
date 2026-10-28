@@ -726,10 +726,9 @@ fn opening_settings_arming_and_disarming_the_hotkey_capture_adds_no_periodic_wak
             )
         }
         .expect("janela de Configurações deveria existir logo após open()");
-        let alter_btn = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(settings_hwnd), 111)
-        }
-        .expect("botão \"Alterar\" não encontrado");
+        let alter_btn =
+            duplicata_win::settings_dialog::control(duplicata_win::settings_dialog::ID_ALTER)
+                .expect("botão \"Alterar\" não encontrado");
 
         // armar → desarmar (Esc) — síncrono, mesma thread.
         // SAFETY: `alter_btn` acabou de ser localizado, válido.
@@ -783,5 +782,142 @@ fn opening_settings_arming_and_disarming_the_hotkey_capture_adds_no_periodic_wak
     assert_eq!(
         processed_after, processed_before,
         "nada disso acorda a worker"
+    );
+}
+
+#[test]
+#[ignore = "leva ~60s e precisa de sessão gráfica"]
+fn the_settings_window_left_open_adds_no_periodic_wakeups() {
+    use std::cell::{Cell, RefCell};
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    // `WM_MOUSEHOVER` (0x02A1), sem puxar a feature `Win32_UI_Controls`.
+    const WM_MOUSEHOVER: u32 = 0x02A1;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SendMessageW, BM_CLICK, WM_MOUSEMOVE, WM_SETTEXT,
+    };
+
+    let queue: Arc<ByteBudgetQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+    let counters = Arc::new(WorkerCounters::new());
+
+    let worker_queue = Arc::clone(&queue);
+    let worker_counters = Arc::clone(&counters);
+    let worker = thread::spawn(move || {
+        let mut repo = FakeHistoryRepository::new();
+        let cfg = Config::with_paths("db".into(), "logs".into());
+        let (heuristic_tx, _rx) = mpsc::channel();
+        run_worker(
+            worker_queue.as_ref(),
+            &mut repo,
+            &cfg,
+            worker_counters.as_ref(),
+            &heuristic_tx,
+        );
+    });
+
+    let history_queue = Arc::clone(&queue) as Arc<dyn CaptureQueue<WorkItem>>;
+    let settings_queue = Arc::clone(&queue) as Arc<dyn CaptureQueue<WorkItem>>;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let loop_thread = thread::spawn(move || {
+        let history_window = HistoryWindow::new(
+            FakeHistoryRepository::new(),
+            || -> Result<Box<dyn HistoryReader>, StoreError> {
+                Ok(Box::new(FakeHistoryRepository::new()))
+            },
+            || true,
+            history_queue,
+            PathBuf::from("db"),
+            Rc::new(SelfWriteFilter::new()),
+        )
+        .expect("criar a janela oculta precisa de sessão gráfica");
+        let dir = tempfile::tempdir().expect("pasta temporária");
+        let cfg = Rc::new(RefCell::new(Config::with_paths("db".into(), "logs".into())));
+        duplicata_win::settings_dialog::open(
+            cfg,
+            dir.path().join("config.toml"),
+            settings_queue,
+            history_window.hwnd(),
+            Rc::new(Cell::new(Some(duplicata_core::HotkeyCombo::DEFAULT))),
+        );
+        use duplicata_win::settings_dialog::{self as dialog, ID_APPLY, ID_CONTENT, ID_MAX_PINNED};
+        let content = dialog::control(ID_CONTENT).expect("área de conteúdo");
+        let pinned = dialog::control(ID_MAX_PINNED).expect("campo do teto");
+        let apply = dialog::control(ID_APPLY).expect("botão Aplicar");
+        let p = dialog::row_point(4).expect("linha do teto");
+        let at = LPARAM(((p.y as u16 as isize) << 16) | (p.x as u16 as isize));
+        let forty: Vec<u16> = "40\0".encode_utf16().collect();
+        // SAFETY: janelas vivas desta thread; mensagens síncronas. Mostra a
+        // dica, edita e aplica: a janela fica aberta durante a medição.
+        unsafe {
+            SendMessageW(content, WM_MOUSEMOVE, None, Some(at));
+            SendMessageW(content, WM_MOUSEHOVER, None, Some(at));
+            SendMessageW(
+                pinned,
+                WM_SETTEXT,
+                Some(WPARAM(0)),
+                Some(LPARAM(forty.as_ptr() as isize)),
+            );
+            SendMessageW(apply, BM_CLICK, None, None);
+        }
+        let settings_hwnd = dialog::window().expect("Configurações abertas");
+        // Longe do cursor: a janela abre centrada sob ele, e o mouse real de
+        // quem usa a máquina passando por cima não é despertar periódico.
+        // SAFETY: janela viva desta thread; só muda a posição.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                settings_hwnd,
+                None,
+                -30000,
+                -30000,
+                0,
+                0,
+                windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+            );
+        }
+
+        let _ = ready_tx.send(message_loop::current_thread_id());
+        message_loop::run();
+        dialog::cancel_if_open();
+        drop(history_window);
+        drop(dir);
+    });
+    let loop_thread_id = ready_rx.recv().expect("janelas devem inicializar");
+
+    thread::sleep(Duration::from_secs(1));
+
+    let timer_before = MESSAGE_LOOP_TIMER_WAKEUPS.load(Ordering::Relaxed);
+    let ime_before = message_loop::MESSAGE_LOOP_IME_TIMER_WAKEUPS.load(Ordering::Relaxed);
+    let msgloop_before = MESSAGE_LOOP_ITERATIONS.load(Ordering::Relaxed);
+    let processed_before = counters.processed();
+
+    thread::sleep(Duration::from_secs(60));
+
+    let timer_after = MESSAGE_LOOP_TIMER_WAKEUPS.load(Ordering::Relaxed);
+    // Os da janela de IME do sistema (`MSCTFIME UI`) ficam registrados à
+    // parte e não reprovam: não são temporizador do duplicata.
+    let ime_after = message_loop::MESSAGE_LOOP_IME_TIMER_WAKEUPS.load(Ordering::Relaxed);
+    println!(
+        "  WM_TIMER da janela de IME do sistema: {}",
+        ime_after - ime_before
+    );
+    let msgloop_after = MESSAGE_LOOP_ITERATIONS.load(Ordering::Relaxed);
+    let processed_after = counters.processed();
+
+    message_loop::post_quit_to(loop_thread_id);
+    loop_thread.join().expect("loop não deve travar");
+    queue.close();
+    worker.join().expect("worker não deve travar");
+
+    assert_no_periodic_wakeups(
+        "the_settings_window_left_open_adds_no_periodic_wakeups",
+        timer_before,
+        timer_after,
+        msgloop_before,
+        msgloop_after,
+    );
+    assert_eq!(
+        processed_after, processed_before,
+        "a janela parada não acorda a worker"
     );
 }

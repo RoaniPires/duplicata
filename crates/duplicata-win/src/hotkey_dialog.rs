@@ -141,12 +141,98 @@ fn key_is_down(vk: VIRTUAL_KEY) -> bool {
     (unsafe { GetKeyState(vk.0 as i32) } as u16 & 0x8000) != 0
 }
 
-pub(crate) enum ExchangeOutcome {
+#[doc(hidden)]
+pub enum ExchangeOutcome {
     Accepted(HotkeyCombo),
     Refused { message: String },
 }
 
-pub(crate) fn try_exchange(
+/// Confere, sem trocar nada, se `candidate` é aceitável e está livre:
+/// registra e solta na janela de teste `probe_hwnd`. O `Err` é a mensagem
+/// de recusa que a tela mostra.
+pub fn probe_hotkey(
+    probe_hwnd: HWND,
+    registered: Option<HotkeyCombo>,
+    candidate: HotkeyCombo,
+) -> Result<(), String> {
+    if let Err(rejection) = validate_hotkey(&candidate) {
+        return Err(format!(
+            "\"{}\": {} Pressione outra combinação.",
+            format_hotkey(&candidate),
+            rejection_reason(rejection)
+        ));
+    }
+
+    if already_current(registered, candidate) {
+        return Err(format!(
+            "\"{}\" já é a combinação em uso. Pressione outra.",
+            format_hotkey(&candidate)
+        ));
+    }
+
+    if hotkey_win::register(probe_hwnd, &candidate).is_err() {
+        return Err(format!(
+            "\"{}\" já está em uso por outro programa. Pressione outra combinação.",
+            format_hotkey(&candidate)
+        ));
+    }
+    let _ = hotkey_win::unregister(probe_hwnd);
+    Ok(())
+}
+
+/// O que fica registrado quando a combinação nova não pôde ser registrada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnSwapFailure {
+    /// A anterior volta (Aplicar/Salvar).
+    KeepPrevious,
+    /// Nenhuma fica (Cancelar: a anterior já não é a que valia).
+    LeaveNone,
+}
+
+/// Troca o atalho registrado em `history_hwnd` de `registered` para `to`.
+pub fn swap_hotkey(
+    history_hwnd: HWND,
+    registered: Option<HotkeyCombo>,
+    to: HotkeyCombo,
+    on_failure: OnSwapFailure,
+) -> Result<(), String> {
+    if registered.is_some() {
+        let _ = hotkey_win::unregister(history_hwnd);
+    }
+    if hotkey_win::register(history_hwnd, &to).is_err() {
+        if let (Some(previous), OnSwapFailure::KeepPrevious) = (registered, on_failure) {
+            let _ = hotkey_win::register(history_hwnd, &previous);
+        }
+        return Err(format!(
+            "\"{}\" ficou indisponível durante o registro. Pressione outra combinação.",
+            format_hotkey(&to)
+        ));
+    }
+    log_event!(Level::INFO, LogFields::new("hotkey_reconfigured"));
+    Ok(())
+}
+
+/// Grava só a chave do atalho sobre o que está no arquivo (ou sobre os
+/// padrões, sem arquivo). A configuração compartilhada pode ter valores que
+/// as Configurações só aplicaram: eles não podem ir ao disco por aqui.
+pub fn persist_hotkey_only(
+    config_path: &Path,
+    paths: &Config,
+    hotkey: HotkeyCombo,
+) -> std::io::Result<()> {
+    let defaults = Config::with_paths(paths.db_path.clone(), paths.log_dir.clone());
+    let mut saved = match std::fs::read_to_string(config_path) {
+        Ok(text) => Config::from_str_over(defaults, &text).0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => defaults,
+        // Sem conseguir ler o salvo, não sobrescreve: o arquivo fica como está.
+        Err(e) => return Err(e),
+    };
+    saved.hotkey = hotkey;
+    saved.persist(config_path)
+}
+
+#[doc(hidden)]
+pub fn try_exchange(
     probe_hwnd: HWND,
     history_hwnd: HWND,
     registered: Option<HotkeyCombo>,
@@ -154,53 +240,20 @@ pub(crate) fn try_exchange(
     config: &Rc<RefCell<Config>>,
     config_path: &Path,
 ) -> ExchangeOutcome {
-    if let Err(rejection) = validate_hotkey(&candidate) {
-        return ExchangeOutcome::Refused {
-            message: format!(
-                "\"{}\": {} Pressione outra combinação.",
-                format_hotkey(&candidate),
-                rejection_reason(rejection)
-            ),
-        };
+    let checked = probe_hotkey(probe_hwnd, registered, candidate).and_then(|()| {
+        swap_hotkey(
+            history_hwnd,
+            registered,
+            candidate,
+            OnSwapFailure::KeepPrevious,
+        )
+    });
+    if let Err(message) = checked {
+        return ExchangeOutcome::Refused { message };
     }
 
-    if already_current(registered, candidate) {
-        return ExchangeOutcome::Refused {
-            message: format!(
-                "\"{}\" já é a combinação em uso. Pressione outra.",
-                format_hotkey(&candidate)
-            ),
-        };
-    }
-
-    if hotkey_win::register(probe_hwnd, &candidate).is_err() {
-        return ExchangeOutcome::Refused {
-            message: format!(
-                "\"{}\" já está em uso por outro programa. Pressione outra combinação.",
-                format_hotkey(&candidate)
-            ),
-        };
-    }
-    let _ = hotkey_win::unregister(probe_hwnd);
-
-    if registered.is_some() {
-        let _ = hotkey_win::unregister(history_hwnd);
-    }
-    if hotkey_win::register(history_hwnd, &candidate).is_err() {
-        if let Some(previous) = registered {
-            let _ = hotkey_win::register(history_hwnd, &previous);
-        }
-        return ExchangeOutcome::Refused {
-            message: format!(
-                "\"{}\" ficou indisponível durante o registro. Pressione outra combinação.",
-                format_hotkey(&candidate)
-            ),
-        };
-    }
-
-    log_event!(Level::INFO, LogFields::new("hotkey_reconfigured"));
     config.borrow_mut().hotkey = candidate;
-    let _ = config.borrow().persist(config_path);
+    let _ = persist_hotkey_only(config_path, &config.borrow(), candidate);
 
     ExchangeOutcome::Accepted(candidate)
 }

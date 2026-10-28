@@ -562,3 +562,100 @@ fn bug1_non_hglobal_cf_bitmap_alongside_cf_dib_is_ignored_without_crashing() {
         other => panic!("esperado Copied{{..}}, obtido {other:?}"),
     }
 }
+
+/// Coloca `text` no clipboard com `owner` como dono (este processo).
+fn publish_own_text(owner: HWND, text: &str) {
+    let hglobal = hglobal_copy(&utf16le_with_nul(text)).expect("GlobalAlloc do texto falhou");
+    // SAFETY: `owner` é uma janela deste processo; a posse do clipboard fica
+    // com ela (`EmptyClipboard`), e o `HGLOBAL` passa ao sistema.
+    unsafe {
+        // Outro programa (o histórico do Windows, por exemplo) pode estar
+        // lendo o clipboard logo depois da cópia anterior: tenta por até 2 s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while OpenClipboard(Some(owner)).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "OpenClipboard falhou — outro processo com o clipboard aberto?"
+            );
+            std::thread::yield_now();
+        }
+        EmptyClipboard().expect("EmptyClipboard falhou");
+        SetClipboardData(
+            CF_UNICODETEXT,
+            Some(HANDLE(hglobal as *mut core::ffi::c_void)),
+        )
+        .expect("SetClipboardData(CF_UNICODETEXT) falhou");
+        let _ = CloseClipboard();
+    }
+}
+
+/// Despacha mensagens até o listener tratar um `WM_CLIPBOARDUPDATE`, com
+/// prazo de 5 s.
+fn pump_until_clipboard_update(listener: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, MSG, PM_REMOVE, QS_ALLINPUT,
+        WM_CLIPBOARDUPDATE,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut msg = MSG::default();
+        // SAFETY: `msg` local; fila da thread do teste.
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            // SAFETY: `msg` acabou de ser preenchida por `PeekMessageW`.
+            unsafe { DispatchMessageW(&msg) };
+            if msg.message == WM_CLIPBOARDUPDATE && msg.hwnd == listener {
+                return;
+            }
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "WM_CLIPBOARDUPDATE não chegou em 5 s");
+        // SAFETY: nenhum handle; só espera a próxima mensagem da fila.
+        unsafe {
+            MsgWaitForMultipleObjects(None, false, left.as_millis() as u32, QS_ALLINPUT);
+        }
+    }
+}
+
+#[test]
+#[ignore = "precisa de sessão gráfica com clipboard; sobrescreve o clipboard atual"]
+fn the_listener_follows_the_shared_blocklist_without_restarting() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use duplicata_core::{ByteBudgetQueue, CaptureQueue, SelfWriteFilter, WorkItem};
+    use duplicata_win::ClipboardListener;
+
+    let this_exe_name = std::env::current_exe()
+        .expect("current_exe() falhou")
+        .file_name()
+        .expect("current_exe() sem nome de arquivo")
+        .to_string_lossy()
+        .into_owned();
+    let owner = create_message_window();
+    let queue = Arc::new(ByteBudgetQueue::<WorkItem>::new());
+    let shared = Rc::new(RefCell::new(cfg_with_blocked(&this_exe_name)));
+    let listener = ClipboardListener::with_shared_config(
+        Arc::clone(&queue) as Arc<dyn CaptureQueue<WorkItem>>,
+        Rc::clone(&shared),
+        Rc::new(SelfWriteFilter::new()),
+    )
+    .expect("registrar o listener precisa de sessão gráfica");
+
+    publish_own_text(owner, "copiado com este processo bloqueado");
+    pump_until_clipboard_update(listener.hwnd());
+    assert!(queue.is_empty(), "bloqueado: a cópia não entra na fila");
+
+    shared.borrow_mut().blocked_programs.clear();
+    publish_own_text(owner, "copiado depois de desbloquear");
+    pump_until_clipboard_update(listener.hwnd());
+    assert_eq!(
+        queue.len(),
+        1,
+        "a lista nova vale na próxima cópia, sem recriar o listener"
+    );
+
+    drop(listener);
+    // SAFETY: janela message-only criada só para este teste.
+    let _ = unsafe { DestroyWindow(owner) };
+}

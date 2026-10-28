@@ -101,7 +101,8 @@ troca os formatos pelos da cópia mais recente
    ▼
 retenção por evento, nunca por timer: remove itens não fixados
 por prazo e por quantidade. Os mesmos dois cortes rodam na
-inicialização e ao salvar uma configuração de retenção.
+inicialização e ao aplicar, cancelar ou salvar a configuração de
+retenção nas Configurações.
 ```
 
 A dedupe considera apenas o formato canônico. Formatos auxiliares variam entre

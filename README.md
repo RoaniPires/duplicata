@@ -45,7 +45,9 @@ Clique com o botão direito num item para fixar ou apagar todo o histórico, ou
 clique no alfinete à esquerda do item para fixar ou desafixar.
 Clique com o botão direito no ícone da bandeja para abrir as Configurações,
 onde ficam o atalho, os prazos de retenção, a lista de programas ignorados e
-a proteção do banco.
+a proteção do banco. Aplicar põe as mudanças em efeito sem gravar, Cancelar
+volta ao que era e Salvar grava. Reduzir o prazo ou a quantidade, ou religar
+a inicialização desativada pelo Gerenciador de Tarefas, pede confirmação.
 
 ## Mais
 

@@ -35,6 +35,9 @@ pub enum WorkItem {
         clip_id: i64,
         done: mpsc::Sender<Result<bool, StoreError>>,
     },
+    SetSecretDetection {
+        enabled: bool,
+    },
 }
 
 pub type HeuristicRejectionSignal = mpsc::Sender<()>;

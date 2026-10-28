@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
 use windows::Win32::Graphics::Gdi::{GetSysColor, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, LOGFONTW};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
@@ -126,6 +126,17 @@ impl SystemAppearance {
     pub fn system_defaults() -> Self {
         Self::read(DEFAULT_DPI, false)
     }
+}
+
+/// `WM_SETTINGCHANGE` da troca de tema claro/escuro.
+pub(crate) fn is_immersive_color_set(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return false;
+    }
+    // SAFETY: num `WM_SETTINGCHANGE`, `lParam` ou é 0 ou aponta para uma
+    // string wide NUL-terminada fornecida pelo SO.
+    let s = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
+    s.map(|s| s == "ImmersiveColorSet").unwrap_or(false)
 }
 
 fn read_hkcu_dword(subkey: PCWSTR, value: PCWSTR) -> Option<u32> {

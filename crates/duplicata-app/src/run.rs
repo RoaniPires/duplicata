@@ -12,7 +12,9 @@ use duplicata_core::{
 use duplicata_win::history_window::HistoryWindow;
 use duplicata_win::listener::ClipboardListener;
 use duplicata_win::message_loop::SESSION_ENDING;
-use duplicata_win::{dialog, hotkey_dialog, hotkey_win, message_loop, paths, Tray};
+use duplicata_win::{
+    dialog, hotkey_dialog, hotkey_win, message_loop, paths, settings_dialog, Tray,
+};
 use tracing::Level;
 
 use crate::bootstrap::{self, InitErrorReporter, Paths};
@@ -55,7 +57,6 @@ pub fn run() -> i32 {
     let queue = Arc::clone(&services.queue);
     let counters = Arc::clone(&services.counters);
     let worker_config = services.config.clone();
-    let listener_config = services.config.clone();
     let mut repo = services.repo;
     let _log_guard = services.log_guard;
 
@@ -73,10 +74,13 @@ pub fn run() -> i32 {
         repo
     });
 
+    // A mesma configuração das Configurações: o Aplicar/Salvar muda o que o
+    // listener segue sem reiniciar.
+    let shared_config = Rc::new(RefCell::new(services.config.clone()));
     let self_write_filter = Rc::new(SelfWriteFilter::new());
-    let listener = match ClipboardListener::new(
+    let listener = match ClipboardListener::with_shared_config(
         Arc::clone(&queue) as Arc<dyn CaptureQueue<_>>,
-        listener_config,
+        Rc::clone(&shared_config),
         Rc::clone(&self_write_filter),
     ) {
         Ok(l) => l,
@@ -129,7 +133,6 @@ pub fn run() -> i32 {
     };
     history_window.set_max_pinned(services.config.max_pinned);
     let config_path = resolved.data_dir.join("config.toml");
-    let shared_config = Rc::new(RefCell::new(services.config.clone()));
     let registered_hotkey: Rc<Cell<Option<HotkeyCombo>>> = Rc::new(Cell::new(None));
 
     if hotkey_win::register(history_window.hwnd(), &services.config.hotkey).is_ok() {
@@ -168,6 +171,9 @@ pub fn run() -> i32 {
     };
 
     message_loop::run();
+    // Sair com as Configurações abertas equivale a Cancelar: antes de soltar
+    // o atalho e destruir as janelas.
+    settings_dialog::cancel_if_open();
 
     drop(listener);
     let _ = hotkey_win::unregister(history_window.hwnd());

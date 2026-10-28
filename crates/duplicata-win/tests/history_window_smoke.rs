@@ -2446,3 +2446,78 @@ mod trash {
         }
     }
 }
+
+fn counting_window(last_limit: &Arc<AtomicUsize>) -> HistoryWindow {
+    let reader = CountingReader {
+        calls: Arc::new(AtomicUsize::new(0)),
+        last_limit: Arc::clone(last_limit),
+        rows: vec![text_row(1, "x")],
+    };
+    let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+    HistoryWindow::new(
+        reader,
+        || -> Result<Box<dyn HistoryReader>, StoreError> {
+            Ok(Box::new(FakeHistoryRepository::new()))
+        },
+        || true,
+        queue,
+        PathBuf::from("test.db"),
+        Rc::new(SelfWriteFilter::new()),
+    )
+    .expect("criar a janela")
+}
+
+#[test]
+#[ignore = "precisa de sessão gráfica (WM_HOTKEY)"]
+fn the_settings_message_changes_the_pin_cap_used_by_the_list() {
+    use duplicata_win::history_window::WM_APP_SET_MAX_PINNED;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_HOTKEY};
+
+    let last_limit = Arc::new(AtomicUsize::new(0));
+    let window = counting_window(&last_limit);
+    // SAFETY: `hwnd` desta thread; o teto novo chega como as Configurações
+    // mandam, e o atalho global (HOTKEY_ID = 1) abre a lista.
+    unsafe {
+        SendMessageW(
+            window.hwnd(),
+            WM_APP_SET_MAX_PINNED,
+            Some(WPARAM(40)),
+            Some(LPARAM(0)),
+        );
+        SendMessageW(window.hwnd(), WM_HOTKEY, Some(WPARAM(1)), Some(LPARAM(0)));
+    }
+    assert_eq!(
+        last_limit.load(Ordering::SeqCst),
+        500 + 40,
+        "o limite da lista passa a usar o teto novo"
+    );
+}
+
+#[test]
+#[ignore = "precisa de sessão gráfica"]
+fn the_encryption_toggle_query_reports_the_target_while_it_runs() {
+    use duplicata_win::history_window::{
+        ENCRYPTION_TOGGLE_IDLE, ENCRYPTION_TOGGLE_TO_ON, WM_APP_QUERY_ENCRYPTION_TOGGLE,
+        WM_APP_TOGGLE_ENCRYPTION,
+    };
+    use windows::Win32::Foundation::WPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    let window = counting_window(&Arc::new(AtomicUsize::new(0)));
+    // SAFETY: `hwnd` desta thread; sem worker, a reescrita pedida fica em
+    // andamento até o fim do teste.
+    let (before, during) = unsafe {
+        let before = SendMessageW(window.hwnd(), WM_APP_QUERY_ENCRYPTION_TOGGLE, None, None);
+        SendMessageW(
+            window.hwnd(),
+            WM_APP_TOGGLE_ENCRYPTION,
+            Some(WPARAM(1)),
+            None,
+        );
+        let during = SendMessageW(window.hwnd(), WM_APP_QUERY_ENCRYPTION_TOGGLE, None, None);
+        (before.0, during.0)
+    };
+    assert_eq!(before, ENCRYPTION_TOGGLE_IDLE);
+    assert_eq!(during, ENCRYPTION_TOGGLE_TO_ON);
+}

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -27,7 +28,9 @@ struct ListenerCtx {
     source: WinClipboard,
     clock: WinClock,
     policy: BackoffPolicy,
-    config: Config,
+    /// A mesma das Configurações: o Aplicar/Salvar muda a lista de ignorados
+    /// sem recriar o listener.
+    config: Rc<RefCell<Config>>,
     queue: Arc<dyn CaptureQueue<WorkItem>>,
     self_write_filter: Rc<SelfWriteFilter>,
     recent_capture_guard: RecentCaptureGuard,
@@ -42,6 +45,14 @@ impl ClipboardListener {
     pub fn new(
         queue: Arc<dyn CaptureQueue<WorkItem>>,
         config: Config,
+        self_write_filter: Rc<SelfWriteFilter>,
+    ) -> Result<Self, InitError> {
+        Self::with_shared_config(queue, Rc::new(RefCell::new(config)), self_write_filter)
+    }
+
+    pub fn with_shared_config(
+        queue: Arc<dyn CaptureQueue<WorkItem>>,
+        config: Rc<RefCell<Config>>,
         self_write_filter: Rc<SelfWriteFilter>,
     ) -> Result<Self, InitError> {
         let mut ctx = Box::new(ListenerCtx {
@@ -126,11 +137,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             if ctx.self_write_filter.consume_if_pending() {
                 return LRESULT(0);
             }
+            // Cópia com empréstimo curto: a captura abre o clipboard, e o dono
+            // dele pode ser uma janela nossa recebendo mensagens no meio.
+            let config = ctx.config.borrow().clone();
             capture_and_enqueue(
                 &ctx.source,
                 &ctx.clock,
                 &ctx.policy,
-                &ctx.config,
+                &config,
                 ctx.queue.as_ref(),
                 &ctx.recent_capture_guard,
             );
