@@ -54,15 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Proibir SetWindowsHookEx / WH_KEYBOARD_LL / timers periódicos
-        run: |
-          set -e
-          pattern='SetWindowsHookEx|WH_KEYBOARD_LL|WH_KEYBOARD\b|SetTimer\(|KillTimer\(|timeBeginPeriod|timeSetEvent'
-          if grep -rEn "$pattern" crates/; then
-            echo "::error::Uso proibido (hook global de teclado ou timer periódico) — ver constituição Princípio V."
-            exit 1
-          fi
-          echo "OK: nenhum hook global de teclado nem timer periódico."
+      - name: Autoteste da verificação
+        run: bash .github/scripts/no_hooks_no_polling_test.sh
+      - name: Proibir ganchos e timers periódicos em src/ e examples/ (tests/ fica de fora)
+        run: bash .github/scripts/no_hooks_no_polling.sh
 
   wxs-invariants:
     runs-on: ubuntu-latest
