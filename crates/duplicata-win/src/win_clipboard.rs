@@ -2,21 +2,28 @@ use duplicata_core::canonical::{
     gate_size, screen, CF_DIB, CF_DIBV5, CF_HDROP, CF_LOCALE, CF_OEMTEXT, CF_REGISTERED_FIRST,
     CF_TEXT, CF_UNICODETEXT,
 };
+use duplicata_core::config::OWNER_PROBE_TIMEOUT;
 use duplicata_core::{
-    copied_or_empty, log_event, CaptureError, CaptureOutcome, CapturedFormat, ClipboardSource,
-    Config, Decision, FormatAnnounce, LogFields, RejectReason,
+    copied_or_empty, is_ole_bookkeeping_only, log_event, may_open, owner_must_answer_first,
+    CaptureError, CaptureOutcome, CapturedFormat, ClipboardSource, Config, Decision,
+    FormatAnnounce, LogFields, OwnerState, RejectReason,
 };
 use tracing::Level;
-use windows::Win32::Foundation::{CloseHandle, HGLOBAL};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_TIMEOUT, HGLOBAL, LPARAM, WPARAM,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
-    GetClipboardOwner, OpenClipboard,
+    GetClipboardOwner, GetClipboardSequenceNumber, GetUpdatedClipboardFormats, OpenClipboard,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowThreadProcessId, IsHungAppWindow, SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+    WM_NULL,
+};
 
 const fn is_known_hglobal_format(format_id: u32) -> bool {
     matches!(
@@ -42,6 +49,120 @@ impl ClipboardSource for WinClipboard {
             let _ = CloseClipboard();
             outcome
         }
+    }
+
+    /// Decide **sem abrir a área** se pode abri-la agora.
+    ///
+    /// O `OleSetClipboard` publica em três atualizações e, entre elas, a thread
+    /// do dono reabre a área sem bombear mensagens. Abrir nesse meio-tempo e
+    /// pedir um formato adiado manda `WM_RENDERFORMAT` a quem não pode
+    /// responder: os dois esperam um pelo outro e o flush não acontece (ver
+    /// `tests/ole_flush_race_smoke.rs`). Por isso:
+    ///
+    /// - estado só com formatos de controle do OLE é recusado aqui mesmo;
+    /// - com dono OLE, ele precisa responder a `WM_NULL` em
+    ///   [`OWNER_PROBE_TIMEOUT`]; se não responde, devolve
+    ///   [`CaptureError::OwnerNotResponding`] e o backoff espera sem segurar a
+    ///   área. Sem saber (sem dono, janela morta), abre como antes.
+    fn try_capture_if_owner_ready(&self, cfg: &Config) -> Result<CaptureOutcome, CaptureError> {
+        let announces = updated_announces();
+        if is_ole_bookkeeping_only(&announces) {
+            // Mesma ordem do `screen`: formato sensível e programa bloqueado
+            // vêm antes do controle do OLE, e é o motivo que vai para o log.
+            // SAFETY: as consultas de `resolve_source_program` (dono, pid,
+            // nome do exe) não exigem a área aberta; aqui o dono é o da lista
+            // lida acima, também sem abrir.
+            let program = unsafe { resolve_source_program() };
+            let reason = match screen(&announces, program.as_deref(), cfg) {
+                Decision::Reject(reason) => reason,
+                Decision::Copy { .. } => RejectReason::OleBookkeepingOnly,
+            };
+            return Ok(CaptureOutcome::Rejected(reason));
+        }
+        let needs_probe = owner_must_answer_first(&announces);
+        let state = if needs_probe {
+            probe_owner()
+        } else {
+            OwnerState::Unknown
+        };
+        if !may_open(needs_probe, state) {
+            return Err(CaptureError::OwnerNotResponding);
+        }
+        self.try_capture(cfg)
+    }
+
+    fn sequence(&self) -> Option<u32> {
+        // SAFETY: só lê um contador global do sistema; não abre a área.
+        Some(unsafe { GetClipboardSequenceNumber() })
+    }
+}
+
+/// Formatos da área com nome, lidos **sem abri-la**.
+///
+/// `GetUpdatedClipboardFormats` não exige `OpenClipboard` nem obtém handle:
+/// não disputa o recurso com o dono e não dispara `WM_RENDERFORMAT`.
+fn updated_announces() -> Vec<FormatAnnounce> {
+    let mut ids = vec![0u32; 32];
+    loop {
+        let mut count: u32 = 0;
+        // SAFETY: `ids` é um slice válido com a capacidade informada; `count`
+        // é local. Com espaço curto a função falha e põe em `count` quantos
+        // formatos existem, e a chamada se repete com esse tamanho.
+        let result = unsafe { GetUpdatedClipboardFormats(&mut ids, &mut count) };
+        let count = count as usize;
+        match result {
+            Ok(()) => {
+                ids.truncate(count.min(ids.len()));
+                break;
+            }
+            Err(_) if count > ids.len() => ids.resize(count, 0),
+            Err(_) => return Vec::new(),
+        }
+    }
+    ids.into_iter()
+        .map(|format_id| FormatAnnounce {
+            format_id,
+            // SAFETY: `GetClipboardFormatNameW` só consulta a tabela de
+            // formatos registrados; não precisa da área aberta.
+            format_name: unsafe { registered_name(format_id) },
+        })
+        .collect()
+}
+
+/// Pergunta ao dono da área se ele está bombeando mensagens.
+fn probe_owner() -> OwnerState {
+    // SAFETY: só consulta o HWND dono; não precisa da área aberta.
+    let Ok(owner) = (unsafe { GetClipboardOwner() }) else {
+        return OwnerState::Unknown;
+    };
+    let timeout_ms = u32::try_from(OWNER_PROBE_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
+    let mut result: usize = 0;
+    // SAFETY: `owner` veio do sistema e pode já ter morrido: nesse caso a
+    // chamada só falha. `WM_NULL` não faz nada no destino; `SMTO_BLOCK` não
+    // processa outras mensagens nesta thread durante a espera, e
+    // `SMTO_ABORTIFHUNG` volta na hora se o dono já está marcado travado.
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            owner,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            timeout_ms,
+            Some(&mut result),
+        )
+    };
+    if sent.0 != 0 {
+        return OwnerState::Responsive;
+    }
+    // SAFETY: lê o último erro desta thread, logo depois da chamada acima.
+    let timed_out = unsafe { GetLastError() } == ERROR_TIMEOUT;
+    // SAFETY: consulta de estado de uma janela; HWND morto só devolve falso.
+    let hung = unsafe { IsHungAppWindow(owner) }.as_bool();
+    if timed_out || hung {
+        OwnerState::NotResponding
+    } else {
+        OwnerState::Unknown
     }
 }
 
@@ -102,11 +223,12 @@ unsafe fn capture_within_open_session(cfg: &Config) -> Result<CaptureOutcome, Ca
 }
 
 /// # Safety
-/// Requer a área de transferência aberta (contrato de
-/// [`capture_within_open_session`]).
+/// Nenhuma das consultas exige a área aberta. Com ela aberta (contrato de
+/// [`capture_within_open_session`]), o dono consultado é o da sessão lida;
+/// sem abrir, é o dono do momento, que quem chama precisa aceitar.
 unsafe fn resolve_source_program() -> Option<String> {
-    // SAFETY: clipboard aberto (contrato desta função) — GetClipboardOwner só
-    // consulta o HWND dono.
+    // SAFETY: GetClipboardOwner só consulta o HWND dono; não exige a área
+    // aberta.
     let owner = unsafe { GetClipboardOwner() }.ok()?;
 
     let mut pid: u32 = 0;

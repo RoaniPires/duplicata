@@ -1,6 +1,7 @@
 use crate::capture::{CanonicalKind, CanonicalSelection, CapturedFormat, FormatAnnounce};
 use crate::config::Config;
 use crate::error::CaptureError;
+use crate::owner_gate::is_ole_bookkeeping_only;
 use crate::size_limit::check_size;
 
 pub const CF_TEXT: u32 = 1;
@@ -60,8 +61,15 @@ pub fn select_canonical(formats: &[CapturedFormat]) -> Option<CanonicalSelection
 pub enum RejectReason {
     SensitiveFlagged,
     BlockedProgram,
-    NoCanonicalFormat { format_ids: Vec<u32> },
-    TooLarge { kind: CanonicalKind, byte_len: u64 },
+    NoCanonicalFormat {
+        format_ids: Vec<u32>,
+    },
+    TooLarge {
+        kind: CanonicalKind,
+        byte_len: u64,
+    },
+    /// Só formatos de controle do OLE: não é conteúdo.
+    OleBookkeepingOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +93,10 @@ pub fn screen(formats: &[FormatAnnounce], source_program: Option<&str>, cfg: &Co
     });
     if blocked {
         return Decision::Reject(RejectReason::BlockedProgram);
+    }
+
+    if is_ole_bookkeeping_only(formats) {
+        return Decision::Reject(RejectReason::OleBookkeepingOnly);
     }
 
     let format_ids: Vec<u32> = formats.iter().map(|f| f.format_id).collect();

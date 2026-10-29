@@ -10,6 +10,9 @@ pub const BACKOFF_START: Duration = Duration::from_millis(10);
 
 pub const BACKOFF_CAP_TOTAL: Duration = Duration::from_millis(250);
 
+/// Quanto a sonda espera o dono OLE responder antes de abrir a área.
+pub const OWNER_PROBE_TIMEOUT: Duration = Duration::from_millis(20);
+
 pub const LOG_FILE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 pub const LOG_FILE_KEEP: usize = 3;

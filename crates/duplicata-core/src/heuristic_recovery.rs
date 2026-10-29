@@ -37,6 +37,8 @@ pub fn recover_on_notification_click(
         }
         Ok((CaptureOutcome::Rejected(_), _)) => RecoverOutcome::Recovered,
         Ok((CaptureOutcome::Empty, _)) => RecoverOutcome::Recovered,
+        // A área mudou no meio: a notificação seguinte trata o conteúdo novo.
+        Ok((CaptureOutcome::Superseded, _)) => RecoverOutcome::Recovered,
         Err(RetryOutcome::Exhausted { .. }) => RecoverOutcome::Failed(CaptureError::Busy),
         Err(RetryOutcome::Fatal(e)) => RecoverOutcome::Failed(e),
     }

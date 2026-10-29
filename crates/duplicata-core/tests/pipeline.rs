@@ -6,7 +6,8 @@ use duplicata_core::backoff::BackoffPolicy;
 use duplicata_core::canonical::{CF_LOCALE, CF_UNICODETEXT};
 use duplicata_core::{
     capture_and_enqueue, ByteBudgetQueue, CaptureError, CaptureQueue, CapturedFormat, Config,
-    FakeClipboardSource, FakeClock, RecentCaptureGuard, WorkItem,
+    FakeClipboardSource, FakeClock, RecentCaptureGuard, WorkItem, OLE_DATA_OBJECT,
+    OLE_PRIVATE_DATA,
 };
 use support::{with_captured_logs, LogBuffer};
 
@@ -172,4 +173,95 @@ fn queue_eviction_emits_one_log_per_discarded_item_with_its_byte_len() {
         "cada queue_evicted traz byte_len=60: {logs}"
     );
     assert_eq!(q.len(), 1);
+}
+
+fn named_format(id: u32, name: &str, bytes: &[u8]) -> CapturedFormat {
+    CapturedFormat {
+        format_id: id,
+        format_name: Some(name.to_string()),
+        bytes: bytes.to_vec(),
+    }
+}
+
+#[test]
+fn an_ole_bookkeeping_only_state_is_logged_by_code_and_nothing_is_enqueued() {
+    let q: ByteBudgetQueue<WorkItem> = ByteBudgetQueue::new();
+    let src = FakeClipboardSource::always(vec![
+        named_format(49161, OLE_DATA_OBJECT, b"SEGREDO-NAO-VAZAR"),
+        named_format(49171, OLE_PRIVATE_DATA, b"SEGREDO-NAO-VAZAR"),
+    ]);
+    let clock = FakeClock::new();
+    let buf = LogBuffer::new();
+
+    with_captured_logs(&buf, || {
+        capture_and_enqueue(
+            &src,
+            &clock,
+            &policy(),
+            &cfg(),
+            &q,
+            &RecentCaptureGuard::new(),
+        )
+    });
+
+    assert!(q.is_empty(), "controle do OLE não é conteúdo");
+    let logs = buf.contents();
+    assert!(logs.contains("ole_bookkeeping_only"), "{logs}");
+    assert!(logs.contains("DEBUG"), "recusa esperada, não aviso: {logs}");
+    assert!(!logs.contains("SEGREDO-NAO-VAZAR"), "{logs}");
+}
+
+#[test]
+fn a_capture_superseded_by_a_new_clipboard_state_is_logged_and_nothing_is_enqueued() {
+    let q: ByteBudgetQueue<WorkItem> = ByteBudgetQueue::new();
+    let src = FakeClipboardSource::owner_never_responds(vec![raw_text_format("oi")]);
+    src.set_sequences(&[1, 2]);
+    let clock = FakeClock::new();
+    let buf = LogBuffer::new();
+
+    with_captured_logs(&buf, || {
+        capture_and_enqueue(
+            &src,
+            &clock,
+            &policy(),
+            &cfg(),
+            &q,
+            &RecentCaptureGuard::new(),
+        )
+    });
+
+    assert!(q.is_empty(), "a notificação nova é quem captura");
+    let logs = buf.contents();
+    assert!(logs.contains("capture_superseded"), "{logs}");
+    assert!(logs.contains("DEBUG"), "espera cedida, não aviso: {logs}");
+}
+
+#[test]
+fn a_blocked_program_with_ole_formats_is_logged_as_blocked_not_as_ole_bookkeeping() {
+    let q: ByteBudgetQueue<WorkItem> = ByteBudgetQueue::new();
+    let src = FakeClipboardSource::always(vec![
+        named_format(49161, OLE_DATA_OBJECT, b"x"),
+        named_format(49171, OLE_PRIVATE_DATA, b"x"),
+    ]);
+    src.set_source_program(Some("powershell.exe"));
+    let mut config = cfg();
+    config.blocked_programs = vec!["powershell.exe".to_string()];
+    let clock = FakeClock::new();
+    let buf = LogBuffer::new();
+
+    with_captured_logs(&buf, || {
+        capture_and_enqueue(
+            &src,
+            &clock,
+            &policy(),
+            &config,
+            &q,
+            &RecentCaptureGuard::new(),
+        )
+    });
+
+    assert!(q.is_empty());
+    let logs = buf.contents();
+    assert!(logs.contains("blocked_program"), "{logs}");
+    assert!(!logs.contains("ole_bookkeeping_only"), "{logs}");
 }

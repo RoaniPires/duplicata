@@ -3,7 +3,11 @@ pub enum CaptureError {
     Busy,
     Unavailable,
     Empty,
-    TooLarge { byte_len: u64 },
+    TooLarge {
+        byte_len: u64,
+    },
+    /// O dono OLE não respondeu à sonda; abrir agora travaria o flush dele.
+    OwnerNotResponding,
 }
 
 impl core::fmt::Display for CaptureError {
@@ -14,6 +18,9 @@ impl core::fmt::Display for CaptureError {
             CaptureError::Empty => write!(f, "área de transferência vazia"),
             CaptureError::TooLarge { byte_len } => {
                 write!(f, "captura acima do limite ({byte_len} bytes)")
+            }
+            CaptureError::OwnerNotResponding => {
+                write!(f, "dono da área de transferência não responde")
             }
         }
     }

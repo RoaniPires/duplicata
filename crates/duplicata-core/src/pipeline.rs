@@ -80,6 +80,12 @@ pub fn capture_and_enqueue(
                 LogFields::new("no_canonical_format").format_ids(format_ids)
             );
         }
+        Ok((CaptureOutcome::Rejected(RejectReason::OleBookkeepingOnly), _)) => {
+            log_event!(Level::DEBUG, LogFields::new("ole_bookkeeping_only"));
+        }
+        Ok((CaptureOutcome::Superseded, _)) => {
+            log_event!(Level::DEBUG, LogFields::new("capture_superseded"));
+        }
         Ok((CaptureOutcome::Rejected(RejectReason::TooLarge { kind, byte_len }), _)) => {
             log_event!(
                 Level::WARN,

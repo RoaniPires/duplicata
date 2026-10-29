@@ -514,6 +514,9 @@ fn try_capture_reads_current_clipboard_or_reports_a_known_outcome() {
         Ok(CaptureOutcome::Rejected(reason)) => {
             println!("recusado por tamanho/sem canônico: {reason:?} — ok")
         }
+        Ok(CaptureOutcome::Superseded) => {
+            panic!("try_capture não espera o dono; só o backoff devolve Superseded")
+        }
         Err(e) => panic!("erro inesperado: {e:?}"),
     }
 }

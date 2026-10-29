@@ -64,6 +64,13 @@ o conteúdo da área de transferência muda
 janela message-only recebe WM_CLIPBOARDUPDATE
    │  (AddClipboardFormatListener — nunca polling)
    ▼
+antes de abrir, só com a lista de formatos (GetUpdatedClipboardFormats):
+   · só formatos de controle do OLE  → recusa, sem abrir
+   · dono OLE ("DataObject")        → sonda o dono com WM_NULL (20 ms);
+     calado → não abre e espera o backoff; a área mudou → cede à
+     notificação nova; esgotado → lê como antes
+   │
+   ▼
 OpenClipboard com backoff exponencial, teto de 250 ms
    │
    ▼
@@ -143,6 +150,30 @@ alfa, então estender o frame sem controlar o alfa deixa a janela inteira como
 chave de composição — invisível, não translúcida. O plano de alfa começa
 sempre tornando o buffer inteiro opaco e só então abre transparência, de modo
 que uma interrupção produz uma janela opaca, nunca invisível.
+
+**A captura não abre a área enquanto um dono OLE não responde.** O
+`Set-Clipboard` do PowerShell 5.1 (que o Claude Code chama a cada cópia no
+Windows) publica pelo `OleSetClipboard` em três atualizações: primeiro só
+"DataObject" e "Ole Private Data", depois os formatos de texto adiados, e por
+fim o flush, com os bytes. Medido com o exemplo `clipboard_trace`: desligado,
+16 de 16 cópias completaram as três em ~15 ms; ligado, a captura abria a área
+no meio e pedia formatos adiados (`GetClipboardData` manda `WM_RENDERFORMAT` à
+janela OLE), o intervalo entre as atualizações subia para ~110 ms e, em 3 de 9
+cópias, o flush não aconteceu: o Claude Code mata o PowerShell aos 2 s e o
+texto some — fica só [DataObject, Ole Private Data, CF_LOCALE], sem dono, e o
+Ctrl+V cola vazio. A leitura é de que o dono OLE e o leitor ficam esperando um
+pelo outro; o mecanismo exato dentro do OLE não foi observado. Por isso a
+decisão é tomada antes de abrir: estado só de controle do OLE não é conteúdo
+(o "DataObject" continua lá mesmo depois do flush, então o que se recusa é a
+lista sem nenhum outro formato), e com dono OLE ele precisa responder a
+`WM_NULL` em 20 ms.
+
+`tests/owner_gate.rs`, `tests/capture_phases.rs` e `tests/backoff.rs` do
+`duplicata-core` prendem a regra. `tests/ole_flush_race_smoke.rs` do
+`duplicata-win` prova a regra contra um dono OLE de modelo, que supõe o que a
+medição sugere: atende os pedidos de render dos outros programas da sessão e
+não atende o do duplicata a tempo. Ele não reproduz o PowerShell real; a prova
+causal é o aceite manual, com o `clipboard_trace` gravando junto.
 
 ## Build e verificação
 

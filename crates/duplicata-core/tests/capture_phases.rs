@@ -4,10 +4,14 @@
 //! cópia. Cada teste aqui prende um pedaço dessa ordem.
 
 use duplicata_core::canonical::{
-    gate_size, screen, Decision, RejectReason, CF_DIB, CF_UNICODETEXT,
+    gate_size, screen, Decision, RejectReason, CF_DIB, CF_LOCALE, CF_UNICODETEXT,
+    SENSITIVE_FORMAT_NAME,
 };
 use duplicata_core::capture::FormatAnnounce;
-use duplicata_core::{copied_or_empty, CanonicalKind, CaptureOutcome, CapturedFormat, Config};
+use duplicata_core::{
+    copied_or_empty, CanonicalKind, CaptureOutcome, CapturedFormat, Config, OLE_DATA_OBJECT,
+    OLE_PRIVATE_DATA,
+};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -130,4 +134,67 @@ fn copied_or_empty_picks_the_right_format_among_several() {
         }
         other => panic!("esperava Copied, obtido {other:?}"),
     }
+}
+
+fn named(id: u32, name: &str) -> FormatAnnounce {
+    FormatAnnounce {
+        format_id: id,
+        format_name: Some(name.to_string()),
+    }
+}
+
+/// A primeira atualização do `OleSetClipboard`: só formatos de controle.
+fn ole_u1() -> Vec<FormatAnnounce> {
+    vec![
+        named(49161, OLE_DATA_OBJECT),
+        named(49171, OLE_PRIVATE_DATA),
+    ]
+}
+
+#[test]
+fn screen_rejects_a_state_with_only_ole_bookkeeping_formats() {
+    assert_eq!(
+        screen(&ole_u1(), None, &cfg()),
+        Decision::Reject(RejectReason::OleBookkeepingOnly)
+    );
+    let orphan = vec![
+        named(49161, OLE_DATA_OBJECT),
+        named(49171, OLE_PRIVATE_DATA),
+        announce(CF_LOCALE),
+    ];
+    assert_eq!(
+        screen(&orphan, None, &cfg()),
+        Decision::Reject(RejectReason::OleBookkeepingOnly)
+    );
+}
+
+#[test]
+fn screen_still_copies_an_unknown_registered_format_alone() {
+    // Fronteira com a etapa 2: só o filtro de "[sem prévia]" descarta isto.
+    assert_eq!(
+        screen(&[named(0xC0A1, "Formato Do App")], None, &cfg()),
+        Decision::Copy { canonical_index: 0 }
+    );
+}
+
+#[test]
+fn a_sensitive_flag_is_rejected_even_with_ole_formats() {
+    let formats = vec![
+        named(49161, OLE_DATA_OBJECT),
+        named(0xC300, SENSITIVE_FORMAT_NAME),
+    ];
+    assert_eq!(
+        screen(&formats, None, &cfg()),
+        Decision::Reject(RejectReason::SensitiveFlagged)
+    );
+}
+
+#[test]
+fn screen_reports_a_blocked_program_before_ole_bookkeeping() {
+    let mut c = cfg();
+    c.blocked_programs = vec!["powershell.exe".to_string()];
+    assert_eq!(
+        screen(&ole_u1(), Some("powershell.exe"), &c),
+        Decision::Reject(RejectReason::BlockedProgram)
+    );
 }

@@ -17,6 +17,7 @@ pub mod identity;
 pub mod list_view;
 pub mod log_fields;
 pub mod menu_icon;
+pub mod owner_gate;
 pub mod pin_button;
 pub mod pipeline;
 pub mod preview;
@@ -65,6 +66,10 @@ pub use list_view::{
 };
 pub use log_fields::LogFields;
 pub use menu_icon::{best_entry, premultiply_bgra, settings_ico_for, IcoEntry};
+pub use owner_gate::{
+    is_ole_bookkeeping_only, may_open, owner_must_answer_first, OwnerState, OLE_DATA_OBJECT,
+    OLE_PRIVATE_DATA,
+};
 pub use pipeline::{capture_and_enqueue, raw_capture_from_copied};
 pub use preview::build_preview;
 pub use queue::{ByteBudgetQueue, CaptureQueue, PushOutcome, QUEUE_BYTE_BUDGET};

@@ -105,3 +105,51 @@ fn a_clipboard_that_frees_up_within_the_backoff_recovers_normally() {
         "é RecoverCapture (pula só a heurística), não Capture — veio {item:?}"
     );
 }
+
+#[test]
+fn a_reread_superseded_by_a_new_clipboard_state_counts_as_recovered() {
+    let source =
+        FakeClipboardSource::owner_never_responds(vec![duplicata_core::unicode_text_format("oi")]);
+    source.set_sequences(&[1, 2]);
+    let clock = FakeClock::new();
+    let queue: ByteBudgetQueue<WorkItem> = ByteBudgetQueue::new();
+
+    let outcome = recover_on_notification_click(
+        &source,
+        &clock,
+        &BackoffPolicy::production(),
+        &cfg(),
+        &queue,
+    );
+
+    assert!(
+        matches!(outcome, RecoverOutcome::Recovered),
+        "a notificação nova trata o conteúdo; veio {outcome:?}"
+    );
+    assert!(queue.is_empty(), "nenhum RecoverCapture enfileirado");
+}
+
+#[test]
+fn a_reread_of_an_ole_bookkeeping_only_state_is_recovered_without_enqueueing() {
+    use duplicata_core::{CapturedFormat, OLE_DATA_OBJECT, OLE_PRIVATE_DATA};
+    let f = |id: u32, name: &str| CapturedFormat {
+        format_id: id,
+        format_name: Some(name.to_string()),
+        bytes: b"controle".to_vec(),
+    };
+    let source =
+        FakeClipboardSource::always(vec![f(49161, OLE_DATA_OBJECT), f(49171, OLE_PRIVATE_DATA)]);
+    let clock = FakeClock::new();
+    let queue: ByteBudgetQueue<WorkItem> = ByteBudgetQueue::new();
+
+    let outcome = recover_on_notification_click(
+        &source,
+        &clock,
+        &BackoffPolicy::production(),
+        &cfg(),
+        &queue,
+    );
+
+    assert!(matches!(outcome, RecoverOutcome::Recovered), "{outcome:?}");
+    assert!(queue.is_empty(), "controle do OLE não vira captura");
+}
