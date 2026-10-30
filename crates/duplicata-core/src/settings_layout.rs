@@ -22,6 +22,11 @@ pub struct LayoutMeasures {
     /// O mais largo entre os textos dos botões.
     pub button_text_width: i32,
     pub scrollbar_width: i32,
+    /// Há linha de estado do Win+V abaixo do atalho.
+    pub status_line: bool,
+    /// O botão de reiniciar o Explorer está visível.
+    pub restart_button: bool,
+    pub restart_text_width: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,18 +51,22 @@ pub struct SettingsLayout {
     pub content_height: i32,
     pub titles: [Rect; 3],
     /// Na ordem de [`crate::settings_text::OPTIONS`].
-    pub rows: [OptionRow; 8],
+    pub rows: [OptionRow; 9],
     pub hotkey_text: Rect,
     pub alter_button: Rect,
     /// Prazo, quantidade e teto.
     pub numeric_edits: [Rect; 3],
     pub days_label: Rect,
-    /// Inicialização, segredos e proteção.
-    pub toggles: [Rect; 3],
+    /// Inicialização, segredos, proteção e Win+V.
+    pub toggles: [Rect; 4],
     pub list: Rect,
     pub list_edit: Rect,
     pub add_button: Rect,
     pub remove_button: Rect,
+    /// Linha de estado do Win+V; vazia quando não há.
+    pub status_line: Rect,
+    /// Vazio quando o botão não aparece.
+    pub restart_button: Rect,
     pub error_line: Rect,
     /// Salvar, Cancelar e Aplicar, da esquerda para a direita.
     pub footer: [Rect; 3],
@@ -86,6 +95,10 @@ const FOOTER_PAD: i32 = 12;
 const PREFERRED_VIEWPORT: i32 = 480;
 /// O atalho troca a descrição por mensagens mais longas (recusa, conflito).
 const HOTKEY_DESCRIPTION_LINES: i32 = 2;
+/// A linha de estado do Win+V cita o `<reinício>` e a reserva: duas linhas.
+const STATUS_LINES: i32 = 2;
+/// A linha de erro do rodapé cabe as mensagens do reinício do Explorer.
+const ERROR_LINES: i32 = 2;
 
 fn rect(left: i32, top: i32, width: i32, height: i32) -> Rect {
     Rect {
@@ -165,28 +178,40 @@ pub fn settings_layout(m: &LayoutMeasures, available_client_height: i32) -> Sett
         top: l.alter_button.top,
         ..l.alter_button
     };
+    if m.status_line {
+        l.status_line = rect(margin, y, right - margin, STATUS_LINES * line);
+        y = l.status_line.bottom + s(BLOCK_GAP);
+    }
+    if m.restart_button {
+        let w = s(BUTTON_MIN_W).max(m.restart_text_width + 2 * s(BUTTON_PAD));
+        l.restart_button = rect(margin, y, w, control_h);
+        y = l.restart_button.bottom + s(BLOCK_GAP);
+    }
     let row = option(&mut l, 1, &mut y);
+    l.toggles[3] = right_aligned(right, row, toggle_w, toggle_h);
+    l.rows[1].control = l.toggles[3];
+    let row = option(&mut l, 2, &mut y);
     l.toggles[0] = right_aligned(right, row, toggle_w, toggle_h);
-    l.rows[1].control = l.toggles[0];
+    l.rows[2].control = l.toggles[0];
 
     title(&mut l, 1, &mut y);
-    let row = option(&mut l, 2, &mut y);
+    let row = option(&mut l, 3, &mut y);
     l.days_label = right_aligned(right, row, m.days_width, line);
     l.numeric_edits[0] = right_aligned(l.days_label.left - gap, row, edit_w, control_h);
-    l.rows[2].control = Rect {
+    l.rows[3].control = Rect {
         left: l.numeric_edits[0].left,
         top: l.numeric_edits[0].top,
         right,
         bottom: l.numeric_edits[0].bottom,
     };
-    for (i, edit) in [(3, 1), (4, 2)] {
+    for (i, edit) in [(4, 1), (5, 2)] {
         let row = option(&mut l, i, &mut y);
         l.numeric_edits[edit] = right_aligned(right, row, edit_w, control_h);
         l.rows[i].control = l.numeric_edits[edit];
     }
 
     title(&mut l, 2, &mut y);
-    option(&mut l, 5, &mut y);
+    option(&mut l, 6, &mut y);
     l.list = rect(margin, y, right - margin, LIST_LINES * line + s(4));
     y = l.list.bottom + s(BLOCK_GAP);
     l.add_button = rect(right - button_w, y, button_w, control_h);
@@ -199,7 +224,7 @@ pub fn settings_layout(m: &LayoutMeasures, available_client_height: i32) -> Sett
     y = l.add_button.bottom + s(BLOCK_GAP);
     l.remove_button = rect(right - button_w, y, button_w, control_h);
     y = l.remove_button.bottom + s(BLOCK_GAP);
-    for (i, toggle) in [(6, 1), (7, 2)] {
+    for (i, toggle) in [(7, 1), (8, 2)] {
         let row = option(&mut l, i, &mut y);
         l.toggles[toggle] = right_aligned(right, row, toggle_w, toggle_h);
         l.rows[i].control = l.toggles[toggle];
@@ -207,7 +232,8 @@ pub fn settings_layout(m: &LayoutMeasures, available_client_height: i32) -> Sett
     l.content_height = y + s(BOTTOM_PAD);
 
     let footer_pad = s(FOOTER_PAD);
-    let footer_h = footer_pad + line + gap + control_h + footer_pad;
+    let error_h = ERROR_LINES * line;
+    let footer_h = footer_pad + error_h + gap + control_h + footer_pad;
     let mut viewport_h = l.content_height.min(s(PREFERRED_VIEWPORT));
     if viewport_h + footer_h > available_client_height {
         viewport_h = (available_client_height - footer_h).max(control_h);
@@ -220,7 +246,7 @@ pub fn settings_layout(m: &LayoutMeasures, available_client_height: i32) -> Sett
         left: client_margin,
         top: viewport_h + footer_pad,
         right: l.client_width - client_margin,
-        bottom: viewport_h + footer_pad + line,
+        bottom: viewport_h + footer_pad + error_h,
     };
     let buttons_top = l.error_line.bottom + gap;
     let mut x = l.client_width - client_margin;

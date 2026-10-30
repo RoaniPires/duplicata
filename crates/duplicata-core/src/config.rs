@@ -47,6 +47,14 @@ pub struct Config {
     pub db_path: PathBuf,
     pub log_dir: PathBuf,
     pub hotkey: HotkeyCombo,
+    /// "Abrir com Win+V": o Win+V no lugar do `hotkey`, que vira a reserva.
+    pub open_with_win_v: bool,
+    /// O `V` do `DisabledHotkeys` foi incluído pelo duplicata (e é ele quem
+    /// o remove ao desligar ou desinstalar).
+    pub win_v_added_v: bool,
+    /// Hora de início do processo do shell no último Salvar da opção: outra
+    /// hora agora quer dizer que o Explorer reiniciou desde então.
+    pub win_v_explorer: Option<u64>,
 }
 
 impl Config {
@@ -65,6 +73,9 @@ impl Config {
             db_path,
             log_dir,
             hotkey: HotkeyCombo::DEFAULT,
+            open_with_win_v: false,
+            win_v_added_v: false,
+            win_v_explorer: None,
         }
     }
 
@@ -183,6 +194,22 @@ impl Config {
                     Some(combo) => cfg.hotkey = combo,
                     None => fallbacks.push(ConfigFallback::field("hotkey")),
                 },
+                "open_with_win_v" => set_bool(
+                    &mut cfg.open_with_win_v,
+                    "open_with_win_v",
+                    value,
+                    &mut fallbacks,
+                ),
+                "win_v_added_v" => set_bool(
+                    &mut cfg.win_v_added_v,
+                    "win_v_added_v",
+                    value,
+                    &mut fallbacks,
+                ),
+                "win_v_explorer" => match value.parse::<u64>() {
+                    Ok(marker) => cfg.win_v_explorer = Some(marker),
+                    Err(_) => fallbacks.push(ConfigFallback::field("win_v_explorer")),
+                },
                 _ => {}
             }
         }
@@ -199,7 +226,9 @@ impl Config {
              max_items = {}\n\
              max_pinned = {}\n\
              heuristic_secret_detection = {}\n\
-             hotkey = \"{}\"\n",
+             hotkey = \"{}\"\n\
+             open_with_win_v = {}\n\
+             win_v_added_v = {}\n",
             self.max_bytes_text,
             self.max_bytes_image,
             self.max_bytes_hdrop,
@@ -209,7 +238,12 @@ impl Config {
             self.max_pinned,
             self.heuristic_secret_detection,
             self.hotkey.format(),
+            self.open_with_win_v,
+            self.win_v_added_v,
         );
+        if let Some(marker) = self.win_v_explorer {
+            s.push_str(&format!("win_v_explorer = {marker}\n"));
+        }
         for prog in &self.blocked_programs {
             s.push_str(&format!("blocked_program = \"{prog}\"\n"));
         }
@@ -224,6 +258,14 @@ impl Config {
 fn set_field(field: &mut u64, key: &'static str, value: &str, fallbacks: &mut Vec<ConfigFallback>) {
     match value.parse::<u64>() {
         Ok(n) if n > 0 => *field = n,
+        _ => fallbacks.push(ConfigFallback::field(key)),
+    }
+}
+
+fn set_bool(field: &mut bool, key: &'static str, value: &str, fallbacks: &mut Vec<ConfigFallback>) {
+    match value {
+        "true" => *field = true,
+        "false" => *field = false,
         _ => fallbacks.push(ConfigFallback::field(key)),
     }
 }

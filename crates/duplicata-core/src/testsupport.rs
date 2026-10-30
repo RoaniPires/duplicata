@@ -3,9 +3,13 @@ use std::collections::HashMap;
 use crate::canonical::CF_UNICODETEXT;
 use crate::capture::{CanonicalSelection, CapturedFormat};
 use crate::error::StoreError;
+use crate::hotkey::HotkeyCombo;
 use crate::reader::HistoryReader;
 use crate::repository::{
     CaptureRecord, ClipListItem, HistoryRepository, SetPinnedOutcome, StoredClip, UpsertOutcome,
+};
+use crate::win_v::{
+    DisabledHotkeysStore, ExplorerInstance, ExplorerRestarter, HotkeySlots, Refused, RegistryError,
 };
 
 pub fn utf16le(s: &str) -> Vec<u8> {
@@ -329,5 +333,200 @@ impl HistoryReader for FakeHistoryRepository {
 
     fn close(self: Box<Self>) -> Result<(), StoreError> {
         Ok(())
+    }
+}
+
+/// `DisabledHotkeys` em memória, com falhas ligáveis por operação.
+#[derive(Debug, Default)]
+pub struct FakeDisabledHotkeys {
+    pub value: Option<String>,
+    pub fail_read: bool,
+    pub fail_write: bool,
+    pub writes: u32,
+}
+
+impl FakeDisabledHotkeys {
+    pub fn with(value: Option<&str>) -> Self {
+        FakeDisabledHotkeys {
+            value: value.map(str::to_string),
+            ..Default::default()
+        }
+    }
+}
+
+impl DisabledHotkeysStore for FakeDisabledHotkeys {
+    fn read(&self) -> Result<Option<String>, RegistryError> {
+        if self.fail_read {
+            return Err(RegistryError(5));
+        }
+        Ok(self.value.clone())
+    }
+
+    fn write(&mut self, value: &str) -> Result<(), RegistryError> {
+        if self.fail_write {
+            return Err(RegistryError(5));
+        }
+        self.writes += 1;
+        self.value = Some(value.to_string());
+        Ok(())
+    }
+
+    fn delete(&mut self) -> Result<(), RegistryError> {
+        if self.fail_write {
+            return Err(RegistryError(5));
+        }
+        self.writes += 1;
+        self.value = None;
+        Ok(())
+    }
+}
+
+/// As duas vagas de atalho. `win_v_free`/`reserve_free` dizem se o
+/// registro daria certo; `both_at_once` marca se em algum momento as duas
+/// ficaram ocupadas.
+#[derive(Debug)]
+pub struct FakeHotkeySlots {
+    pub win_v_free: bool,
+    pub reserve_free: bool,
+    pub win_v: bool,
+    pub reserve: Option<HotkeyCombo>,
+    pub both_at_once: bool,
+    pub win_v_attempts: u32,
+}
+
+impl FakeHotkeySlots {
+    pub fn new(win_v_free: bool) -> Self {
+        FakeHotkeySlots {
+            win_v_free,
+            reserve_free: true,
+            win_v: false,
+            reserve: None,
+            both_at_once: false,
+            win_v_attempts: 0,
+        }
+    }
+
+    /// Com a reserva já registrada, como depois da inicialização.
+    pub fn holding_reserve(win_v_free: bool, reserve: HotkeyCombo) -> Self {
+        FakeHotkeySlots {
+            reserve: Some(reserve),
+            ..FakeHotkeySlots::new(win_v_free)
+        }
+    }
+
+    /// Com o Win+V registrado.
+    pub fn holding_win_v() -> Self {
+        FakeHotkeySlots {
+            win_v: true,
+            ..FakeHotkeySlots::new(true)
+        }
+    }
+
+    fn check(&mut self) {
+        if self.win_v && self.reserve.is_some() {
+            self.both_at_once = true;
+        }
+    }
+}
+
+impl HotkeySlots for FakeHotkeySlots {
+    fn try_win_v(&mut self) -> bool {
+        self.win_v_attempts += 1;
+        if self.win_v_free {
+            self.win_v = true;
+        }
+        self.check();
+        self.win_v
+    }
+
+    fn release_win_v(&mut self) {
+        self.win_v = false;
+    }
+
+    fn register_reserve(&mut self, combo: HotkeyCombo) -> bool {
+        if !self.reserve_free {
+            return false;
+        }
+        self.reserve = Some(combo);
+        self.check();
+        true
+    }
+
+    fn release_reserve(&mut self) {
+        self.reserve = None;
+    }
+}
+
+/// Explorer que aceita ou recusa fechar, e anota o que foi pedido.
+#[derive(Debug, Default)]
+pub struct FakeExplorerRestarter {
+    pub refuse: bool,
+    pub shutdowns: u32,
+    pub restarts: u32,
+}
+
+impl ExplorerRestarter for FakeExplorerRestarter {
+    fn shutdown(&mut self) -> Result<(), Refused> {
+        self.shutdowns += 1;
+        if self.refuse {
+            Err(Refused)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn restart(&mut self) {
+        self.restarts += 1;
+    }
+}
+
+/// Compartilhado com o teste, que confere o valor depois.
+impl<T: DisabledHotkeysStore> DisabledHotkeysStore for std::rc::Rc<std::cell::RefCell<T>> {
+    fn read(&self) -> Result<Option<String>, RegistryError> {
+        self.borrow().read()
+    }
+
+    fn write(&mut self, value: &str) -> Result<(), RegistryError> {
+        self.borrow_mut().write(value)
+    }
+
+    fn delete(&mut self) -> Result<(), RegistryError> {
+        self.borrow_mut().delete()
+    }
+}
+
+/// Explorer que não muda.
+#[derive(Debug, Clone, Copy)]
+pub struct FixedExplorer(pub Option<u64>);
+
+impl ExplorerInstance for FixedExplorer {
+    fn current(&self) -> Option<u64> {
+        self.0
+    }
+}
+
+/// Compartilhadas com o teste, que muda a disponibilidade no meio.
+impl<T: HotkeySlots> HotkeySlots for std::rc::Rc<std::cell::RefCell<T>> {
+    fn try_win_v(&mut self) -> bool {
+        self.borrow_mut().try_win_v()
+    }
+
+    fn release_win_v(&mut self) {
+        self.borrow_mut().release_win_v();
+    }
+
+    fn register_reserve(&mut self, combo: HotkeyCombo) -> bool {
+        self.borrow_mut().register_reserve(combo)
+    }
+
+    fn release_reserve(&mut self) {
+        self.borrow_mut().release_reserve();
+    }
+}
+
+/// Explorer que o teste troca (simula o reinício).
+impl ExplorerInstance for std::rc::Rc<std::cell::Cell<Option<u64>>> {
+    fn current(&self) -> Option<u64> {
+        self.get()
     }
 }

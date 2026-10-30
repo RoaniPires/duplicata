@@ -64,7 +64,7 @@ use crate::app_icon;
 use crate::clipboard_restore;
 use crate::dpi;
 use crate::error_banner;
-use crate::hotkey_win::HOTKEY_ID;
+use crate::hotkey_win::{HOTKEY_ID, HOTKEY_ID_WIN_V};
 use crate::hover_popup::{HoverPopup, PopupColors, ShowRequest};
 use crate::navigation::{next_selection_index, row_index_at, scroll_offset_after_wheel, NavKey};
 use crate::paste_injector;
@@ -2525,7 +2525,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(0)
         }
-        WM_HOTKEY if wparam.0 == HOTKEY_ID as usize => {
+        // A reserva ou o Win+V: nunca os dois registrados ao mesmo tempo.
+        WM_HOTKEY if wparam.0 == HOTKEY_ID as usize || wparam.0 == HOTKEY_ID_WIN_V as usize => {
             if let Some(ctx) = ctx_ref(hwnd) {
                 handle_hotkey_toggle(hwnd, ctx);
             }

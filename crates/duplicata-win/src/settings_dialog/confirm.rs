@@ -1,9 +1,11 @@
-//! Confirmação do Salvar com mudança irreversível.
+//! Confirmação do Salvar (mudança irreversível ou do Win+V) e do botão de
+//! reiniciar o Explorer.
 //!
 //! Janela owned pelas Configurações (que ficam desabilitadas enquanto ela
-//! está aberta), com as linhas vindas do núcleo e os botões "Salvar" e
-//! "Voltar". O foco começa em "Voltar"; X e Esc também voltam. O resultado
-//! chega às Configurações por mensagem, sem laço de mensagens aninhado.
+//! está aberta), com as linhas vindas do núcleo, o botão principal ("Salvar"
+//! ou "Reiniciar") e "Voltar". O foco começa em "Voltar"; X e Esc também
+//! voltam. O resultado chega às Configurações por mensagem, sem laço de
+//! mensagens aninhado. Uma linha vazia separa blocos.
 
 use std::cell::RefCell;
 
@@ -45,6 +47,7 @@ const BUTTON_H_PX: i32 = 28;
 
 struct ConfirmState {
     lines: Vec<String>,
+    primary: &'static str,
     font: HFONT,
     dpi: u32,
     /// Altura de cada linha na largura útil, medida na criação.
@@ -80,9 +83,16 @@ fn own_copy(font: HFONT) -> HFONT {
 }
 
 /// Abre centrada sobre `owner`, com uma cópia própria de `font`.
-pub(super) fn open(owner: HWND, lines: Vec<String>, font: HFONT, dpi: u32) -> Option<HWND> {
+pub(super) fn open(
+    owner: HWND,
+    lines: Vec<String>,
+    font: HFONT,
+    dpi: u32,
+    primary: &'static str,
+) -> Option<HWND> {
     let state = Box::new(ConfirmState {
         lines,
+        primary,
         font: own_copy(font),
         dpi,
         heights: RefCell::new(Vec::new()),
@@ -160,6 +170,10 @@ fn measure(state: &ConfirmState) -> Vec<i32> {
             .lines
             .iter()
             .map(|line| {
+                // A linha vazia só separa blocos: a altura fica nos espaços.
+                if line.is_empty() {
+                    return 0;
+                }
                 let mut buf: Vec<u16> = line.encode_utf16().collect();
                 let mut rc = RECT {
                     left: 0,
@@ -233,15 +247,12 @@ unsafe fn place(hwnd: HWND, owner: HWND) {
 
 /// # Safety
 /// Dentro do `WM_CREATE` de `hwnd`.
-unsafe fn create_buttons(hwnd: HWND, font: HFONT) {
+unsafe fn create_buttons(hwnd: HWND, font: HFONT, primary: &str) {
     // SAFETY: `hwnd` é o pai, no próprio `WM_CREATE`; o Tab segue a ordem
     // de criação (Salvar, Voltar).
     unsafe {
         let hinstance = GetModuleHandleW(None).ok();
-        for (id, label) in [
-            (ID_CONFIRM_SAVE, text::BUTTON_SAVE),
-            (ID_BACK, text::BUTTON_BACK),
-        ] {
+        for (id, label) in [(ID_CONFIRM_SAVE, primary), (ID_BACK, text::BUTTON_BACK)] {
             let label = wide(label);
             let b = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -302,6 +313,10 @@ fn paint(hwnd: HWND, state: &ConfirmState) {
         SetTextColor(hdc, c.text);
         let mut y = s(MARGIN_PX);
         for (line, h) in state.lines.iter().zip(state.heights.borrow().iter()) {
+            if line.is_empty() {
+                y += s(GAP_PX);
+                continue;
+            }
             let mut buf: Vec<u16> = line.encode_utf16().collect();
             let mut rc = RECT {
                 left: s(MARGIN_PX),
@@ -334,7 +349,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             unsafe {
                 let _ = window_material::apply_attributes(hwnd, dark);
                 if let Some(state) = state_ref(hwnd) {
-                    create_buttons(hwnd, state.font);
+                    create_buttons(hwnd, state.font, state.primary);
                 }
             }
             LRESULT(0)

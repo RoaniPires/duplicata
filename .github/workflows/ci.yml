@@ -74,9 +74,9 @@ jobs:
       - name: Proibir TerminateProcess (ou equivalente de encerrar à força)
         run: |
           set -e
-          pattern='TerminateProcess|process::abort'
+          pattern='TerminateProcess|process::abort|RmForceShutdown'
           if grep -rEn "$pattern" crates/duplicata-win crates/duplicata-app; then
-            echo "::error::Encerramento forçado de processo encontrado em duplicata-win/duplicata-app. O encerramento só é pedido (--request-shutdown) e esperado sem teto: a operação que mais demora na saída é justamente a que não pode ser interrompida."
+            echo "::error::Encerramento forçado de processo encontrado em duplicata-win/duplicata-app (TerminateProcess, process::abort ou RmForceShutdown). O encerramento só é pedido (--request-shutdown, ou o fechamento normal do Explorer pelo Restart Manager) e esperado sem teto: a operação que mais demora na saída é justamente a que não pode ser interrompida."
             exit 1
           fi
-          echo "OK: nenhum TerminateProcess (ou equivalente) em duplicata-win/duplicata-app."
+          echo "OK: nenhum TerminateProcess, process::abort ou RmForceShutdown em duplicata-win/duplicata-app."

@@ -30,3 +30,17 @@ pub fn show_uninstall_leftover(message: &str) {
         eprintln!("duplicata: {message}");
     }
 }
+
+/// Erro de uma ação das Configurações que terminou com a janela já fechada.
+pub fn show_settings_error(message: &str) {
+    let title = HSTRING::from("duplicata");
+    let body = HSTRING::from(message);
+
+    // SAFETY: mesma garantia de `show_init_error` — strings wide válidas via
+    // `HSTRING`, sem janela-pai.
+    let result = unsafe { MessageBoxW(None, &body, &title, MB_ICONWARNING | MB_OK) };
+
+    if result.0 == 0 {
+        eprintln!("duplicata: {message}");
+    }
+}

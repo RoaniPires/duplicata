@@ -362,14 +362,21 @@ fn paint(hwnd: HWND, ctx: &SettingsCtx) {
         let option = text::OPTIONS[i];
         p.text(option.name, shift(row.name), look.font, primary, one_line);
         match i {
-            0 => p.text(
-                &hotkey.description,
-                shift(row.description),
-                look.font,
-                dim,
-                DT_WORDBREAK | DT_END_ELLIPSIS,
-            ),
-            1 => p.text(
+            0 => {
+                // A dica do Win+V na segunda linha, enquanto o campo espera.
+                let description = match hotkey.hint {
+                    Some(hint) => format!("{}\n{hint}", hotkey.description),
+                    None => hotkey.description.clone(),
+                };
+                p.text(
+                    &description,
+                    shift(row.description),
+                    look.font,
+                    dim,
+                    DT_WORDBREAK | DT_END_ELLIPSIS,
+                )
+            }
+            2 => p.text(
                 session.startup_description(),
                 shift(row.description),
                 look.font,
@@ -384,6 +391,15 @@ fn paint(hwnd: HWND, ctx: &SettingsCtx) {
                 one_line,
             ),
         }
+    }
+    if let Some(status) = &hotkey.status_line {
+        p.text(
+            status,
+            shift(l.status_line),
+            look.font,
+            primary,
+            DT_WORDBREAK | DT_END_ELLIPSIS,
+        );
     }
     p.text(
         &hotkey.combo,

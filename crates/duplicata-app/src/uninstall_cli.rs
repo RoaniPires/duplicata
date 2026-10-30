@@ -1,6 +1,11 @@
 use std::path::Path;
 
 #[cfg(windows)]
+use duplicata_core::win_v::{
+    uninstall_release, uninstall_release_message, DisabledHotkeysStore, UninstallRelease,
+};
+
+#[cfg(windows)]
 pub fn uninstall_data() -> i32 {
     let Ok(data_dir) = duplicata_win::paths::data_dir() else {
         duplicata_win::dialog::show_uninstall_leftover(
@@ -17,18 +22,46 @@ pub fn uninstall_data() -> i32 {
     uninstall_data_at(
         &data_dir,
         &duplicata_win::uninstall_dialog::ask_delete_or_preserve,
+        &mut duplicata_win::disabled_hotkeys::RegistryDisabledHotkeys::explorer(),
+        &duplicata_win::dialog::show_uninstall_leftover,
     )
 }
 
 #[cfg(windows)]
-pub fn uninstall_data_at(data_dir: &Path, ask: &dyn Fn(bool) -> bool) -> i32 {
+pub fn uninstall_data_at(
+    data_dir: &Path,
+    ask: &dyn Fn(bool) -> bool,
+    disabled_hotkeys: &mut dyn DisabledHotkeysStore,
+    notify: &dyn Fn(&str),
+) -> i32 {
+    // O `V` do Win+V sai seja qual for a escolha, e antes dela: apagar os
+    // dados leva junto o `config.toml`, que diz se o `V` é do duplicata.
+    let config = std::fs::read_to_string(data_dir.join("config.toml")).ok();
+    let released = uninstall_release(config.as_deref(), disabled_hotkeys);
+    tracing::warn!(
+        win_v = match released {
+            UninstallRelease::Untouched => "intocado",
+            UninstallRelease::Removed => "removido",
+            UninstallRelease::Failed(_) => "falhou",
+        },
+        "uninstall-data: DisabledHotkeys"
+    );
+    // Erro visível, não só no log: o Win+V continua fora do Windows.
+    let win_v_left = match uninstall_release_message(released) {
+        Some(message) => {
+            notify(message);
+            1
+        }
+        None => 0,
+    };
+
     let history_protected = data_dir.join("duplicata.work.db").exists();
     tracing::warn!(history_protected, "uninstall-data: protecao por conta");
 
     let delete = ask(history_protected);
     tracing::warn!(delete, "uninstall-data: escolha do usuario no dialogo");
     if !delete {
-        return 0;
+        return win_v_left;
     }
 
     let items = duplicata_core::removal_order(data_dir);
@@ -49,9 +82,9 @@ pub fn uninstall_data_at(data_dir: &Path, ask: &dyn Fn(bool) -> bool) -> i32 {
 
     match duplicata_core::leftover_message(&outcome) {
         Some(message) => {
-            duplicata_win::dialog::show_uninstall_leftover(&message);
+            notify(&message);
             1
         }
-        None => 0,
+        None => win_v_left,
     }
 }

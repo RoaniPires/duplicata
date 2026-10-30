@@ -10,9 +10,15 @@ pub mod clipboard_restore;
 #[cfg(windows)]
 pub mod dialog;
 #[cfg(windows)]
+pub mod disabled_hotkeys;
+#[cfg(windows)]
 pub mod dpi;
 #[cfg(windows)]
 pub mod error_banner;
+#[cfg(windows)]
+pub mod explorer_instance;
+#[cfg(windows)]
+pub mod explorer_restart;
 #[cfg(windows)]
 pub mod history_window;
 #[cfg(windows)]
@@ -51,6 +57,10 @@ pub mod tray;
 pub mod uninstall_dialog;
 #[cfg(windows)]
 pub mod win_clipboard;
+#[cfg(windows)]
+pub mod win_v_dialog;
+#[cfg(windows)]
+pub mod win_v_runtime;
 #[cfg(windows)]
 pub mod window_material;
 

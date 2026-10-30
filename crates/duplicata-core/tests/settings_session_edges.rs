@@ -82,6 +82,7 @@ fn save_that_stays_open_makes_what_it_applied_the_new_start_so_cancel_undoes_not
     let out = s.finish_save(SaveReport {
         hotkey_failed: false,
         persist_failed: true,
+        ..Default::default()
     });
     assert!(matches!(
         out,
@@ -234,6 +235,7 @@ fn a_blocked_startup_confirmed_then_failed_write_no_longer_shows_the_block() {
     s.finish_save(SaveReport {
         hotkey_failed: false,
         persist_failed: true,
+        ..Default::default()
     });
     assert!(!s.startup_blocked());
     assert_eq!(s.startup_description(), text::STARTUP.description);

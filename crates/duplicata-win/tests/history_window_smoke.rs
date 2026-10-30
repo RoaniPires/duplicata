@@ -220,6 +220,38 @@ fn the_load_limit_includes_the_pin_cap() {
 }
 
 #[test]
+#[ignore = "precisa de sessão gráfica (WM_HOTKEY)"]
+fn the_win_v_hotkey_opens_the_window_like_the_reserve() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SendMessageW, WM_HOTKEY};
+
+    let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+    let window = HistoryWindow::new(
+        FakeHistoryRepository::new(),
+        || -> Result<Box<dyn HistoryReader>, StoreError> {
+            Ok(Box::new(FakeHistoryRepository::new()))
+        },
+        || true,
+        queue,
+        PathBuf::from("test.db"),
+        Rc::new(SelfWriteFilter::new()),
+    )
+    .expect("criar a janela");
+
+    // SAFETY: `hwnd` desta thread; simula o Win+V (HOTKEY_ID_WIN_V = 2).
+    unsafe {
+        SendMessageW(
+            window.hwnd(),
+            WM_HOTKEY,
+            Some(WPARAM(duplicata_win::hotkey_win::HOTKEY_ID_WIN_V as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+    // SAFETY: só consulta a visibilidade da janela viva.
+    assert!(unsafe { IsWindowVisible(window.hwnd()) }.as_bool());
+}
+
+#[test]
 #[ignore = "mexe no cursor do sistema; precisa de sessão gráfica"]
 fn the_window_opens_near_the_cursor_inside_the_work_area() {
     use windows::Win32::Foundation::{LPARAM, POINT, RECT, WPARAM};

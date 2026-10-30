@@ -9,11 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use duplicata_core::{
     log_event, run_worker, CaptureQueue, HotkeyCombo, InitError, LogFields, SelfWriteFilter,
 };
+use duplicata_win::disabled_hotkeys::RegistryDisabledHotkeys;
+use duplicata_win::explorer_instance::ShellProcess;
 use duplicata_win::history_window::HistoryWindow;
 use duplicata_win::listener::ClipboardListener;
 use duplicata_win::message_loop::SESSION_ENDING;
+use duplicata_win::win_v_runtime::WinVRuntime;
 use duplicata_win::{
-    dialog, hotkey_dialog, hotkey_win, message_loop, paths, settings_dialog, Tray,
+    dialog, hotkey_dialog, message_loop, paths, settings_dialog, win_v_dialog, Tray,
 };
 use tracing::Level;
 
@@ -135,33 +138,44 @@ pub fn run() -> i32 {
     let config_path = resolved.data_dir.join("config.toml");
     let registered_hotkey: Rc<Cell<Option<HotkeyCombo>>> = Rc::new(Cell::new(None));
 
-    if hotkey_win::register(history_window.hwnd(), &services.config.hotkey).is_ok() {
-        registered_hotkey.set(Some(services.config.hotkey));
-    } else {
+    // O Win+V ou a reserva: quem decide é o núcleo (`win_v::startup`).
+    let win_v = WinVRuntime::new(
+        history_window.hwnd(),
+        Rc::clone(&shared_config),
+        config_path,
+        Rc::clone(&registered_hotkey),
+        Box::new(RegistryDisabledHotkeys::explorer()),
+        Box::new(ShellProcess),
+    );
+    let startup = win_v.startup();
+    if startup.reserve_failed {
         log_event!(Level::WARN, LogFields::new("hotkey_register_failed"));
+    }
+    if startup.show_failure_window {
+        // A janela de conflito da reserva, se for o caso, abre quando esta
+        // fechar.
+        win_v_dialog::open(Rc::clone(&win_v));
+    } else if startup.reserve_failed {
         hotkey_dialog::open_after_conflict(
             history_window.hwnd(),
-            services.config.hotkey,
+            win_v.reserve(),
             Rc::clone(&shared_config),
-            config_path.clone(),
+            win_v.config_path().clone(),
             Rc::clone(&registered_hotkey),
         );
     }
 
     let tray = match Tray::create(
-        history_window.hwnd(),
-        Rc::clone(&shared_config),
-        config_path,
         Arc::clone(&queue) as Arc<dyn CaptureQueue<_>>,
         heuristic_rx,
-        Rc::clone(&registered_hotkey),
+        Rc::clone(&win_v),
         env!("CARGO_PKG_VERSION"),
     ) {
         Ok(t) => t,
         Err(e) => {
             reporter.report(&InitError::Tray);
             let _ = e;
-            let _ = hotkey_win::unregister(history_window.hwnd());
+            win_v.release_all();
             drop(history_window);
             drop(listener);
             queue.close();
@@ -176,7 +190,7 @@ pub fn run() -> i32 {
     settings_dialog::cancel_if_open();
 
     drop(listener);
-    let _ = hotkey_win::unregister(history_window.hwnd());
+    win_v.release_all();
     drop(history_window);
     tray.destroy();
     queue.close();

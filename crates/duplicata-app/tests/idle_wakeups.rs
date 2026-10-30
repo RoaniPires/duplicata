@@ -701,24 +701,21 @@ fn opening_settings_arming_and_disarming_the_hotkey_capture_adds_no_periodic_wak
         let registered_hotkey: Rc<Cell<Option<duplicata_core::HotkeyCombo>>> =
             Rc::new(Cell::new(Some(duplicata_core::HotkeyCombo::DEFAULT)));
         let (_heuristic_tx2, heuristic_rx2) = std_mpsc::channel();
-        let tray = duplicata_win::Tray::create(
+        let win_v = test_win_v(
             history_window.hwnd(),
-            Rc::new(std::cell::RefCell::new(cfg.clone())),
+            Rc::new(std::cell::RefCell::new(cfg)),
             PathBuf::from("config.toml"),
+            registered_hotkey,
+        );
+        let tray = duplicata_win::Tray::create(
             tray_queue,
             heuristic_rx2,
-            Rc::clone(&registered_hotkey),
+            Rc::clone(&win_v),
             "0.0.0-teste",
         )
         .expect("criar o ícone de bandeja precisa de sessão gráfica");
 
-        duplicata_win::settings_dialog::open(
-            Rc::new(std::cell::RefCell::new(cfg)),
-            PathBuf::from("config.toml"),
-            settings_queue,
-            history_window.hwnd(),
-            registered_hotkey,
-        );
+        duplicata_win::settings_dialog::open(settings_queue, win_v);
         let settings_hwnd = unsafe {
             windows::Win32::UI::WindowsAndMessaging::FindWindowW(
                 windows::core::w!("duplicata_settings_dialog"),
@@ -832,17 +829,19 @@ fn the_settings_window_left_open_adds_no_periodic_wakeups() {
         let dir = tempfile::tempdir().expect("pasta temporária");
         let cfg = Rc::new(RefCell::new(Config::with_paths("db".into(), "logs".into())));
         duplicata_win::settings_dialog::open(
-            cfg,
-            dir.path().join("config.toml"),
             settings_queue,
-            history_window.hwnd(),
-            Rc::new(Cell::new(Some(duplicata_core::HotkeyCombo::DEFAULT))),
+            test_win_v(
+                history_window.hwnd(),
+                cfg,
+                dir.path().join("config.toml"),
+                Rc::new(Cell::new(Some(duplicata_core::HotkeyCombo::DEFAULT))),
+            ),
         );
         use duplicata_win::settings_dialog::{self as dialog, ID_APPLY, ID_CONTENT, ID_MAX_PINNED};
         let content = dialog::control(ID_CONTENT).expect("área de conteúdo");
         let pinned = dialog::control(ID_MAX_PINNED).expect("campo do teto");
         let apply = dialog::control(ID_APPLY).expect("botão Aplicar");
-        let p = dialog::row_point(4).expect("linha do teto");
+        let p = dialog::row_point(5).expect("linha do teto");
         let at = LPARAM(((p.y as u16 as isize) << 16) | (p.x as u16 as isize));
         let forty: Vec<u16> = "40\0".encode_utf16().collect();
         // SAFETY: janelas vivas desta thread; mensagens síncronas. Mostra a
@@ -920,4 +919,22 @@ fn the_settings_window_left_open_adds_no_periodic_wakeups() {
         processed_after, processed_before,
         "a janela parada não acorda a worker"
     );
+}
+
+/// O estado do Win+V com o registro em memória (o `DisabledHotkeys` real
+/// fica intocado) e um Explorer que não muda.
+fn test_win_v(
+    history: windows::Win32::Foundation::HWND,
+    cfg: Rc<std::cell::RefCell<Config>>,
+    config_path: PathBuf,
+    registered: Rc<std::cell::Cell<Option<duplicata_core::HotkeyCombo>>>,
+) -> Rc<duplicata_win::win_v_runtime::WinVRuntime> {
+    duplicata_win::win_v_runtime::WinVRuntime::new(
+        history,
+        cfg,
+        config_path,
+        registered,
+        Box::new(duplicata_core::testsupport::FakeDisabledHotkeys::default()),
+        Box::new(duplicata_core::testsupport::FixedExplorer(None)),
+    )
 }

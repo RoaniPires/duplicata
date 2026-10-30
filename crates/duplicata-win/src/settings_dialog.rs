@@ -14,7 +14,7 @@
 
 mod confirm;
 mod content;
-mod controls;
+pub(crate) mod controls;
 mod tooltip;
 
 use std::cell::{Cell, RefCell};
@@ -34,6 +34,7 @@ use duplicata_core::settings_session::{
 };
 use duplicata_core::settings_text as text;
 use duplicata_core::theme;
+use duplicata_core::win_v::{restart_error_line, ExplorerRestartOutcome};
 use duplicata_core::{
     interpret_approval, log_event, CaptureQueue, Config, HotkeyCombo, LogFields, WorkItem,
 };
@@ -44,8 +45,8 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateCompatibleDC, CreateFontIndirectW, CreateSolidBrush, DeleteDC, DeleteObject,
     DrawTextW, EndPaint, FillRect, GetMonitorInfoW, GetTextMetricsW, InvalidateRect,
     MonitorFromWindow, RedrawWindow, SelectObject, SetBkMode, SetTextColor, DT_END_ELLIPSIS,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
+    DT_NOPREFIX, DT_WORDBREAK, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
     RDW_UPDATENOW, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -67,12 +68,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, EN_CHANGE, ES_AUTOHSCROLL,
     ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LB_ADDSTRING,
     LB_GETCURSEL, LB_RESETCONTENT, MSG, NONCLIENTMETRICSW, SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_GETDLGCODE, WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETTEXT, WM_SETTINGCHANGE,
-    WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CONTROLPARENT, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DPICHANGED, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_GETDLGCODE, WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETTEXT,
+    WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use crate::app_icon;
@@ -86,7 +87,9 @@ use crate::hotkey_dialog::{self, OnSwapFailure};
 use crate::startup_registry;
 use crate::system_appearance::{self, SystemAppearance, ThemePalette};
 use crate::text_metrics;
+use crate::win_v_runtime::WinVRuntime;
 use crate::window_material;
+use crate::{explorer_restart, tray};
 
 use controls::ControlColors;
 use tooltip::Tooltip;
@@ -129,6 +132,10 @@ pub const ID_SAVE: i32 = 212;
 pub const ID_CANCEL: i32 = 2;
 #[doc(hidden)]
 pub const ID_APPLY: i32 = 214;
+#[doc(hidden)]
+pub const ID_WIN_V: i32 = 215;
+#[doc(hidden)]
+pub const ID_RESTART_EXPLORER: i32 = 216;
 const IDOK: usize = 1;
 
 #[derive(Clone, Copy, Default)]
@@ -145,6 +152,8 @@ struct Controls {
     remove: HWND,
     secrets: HWND,
     protection: HWND,
+    win_v: HWND,
+    restart_explorer: HWND,
     save: HWND,
     cancel: HWND,
     apply: HWND,
@@ -159,9 +168,11 @@ impl Controls {
         ]
     }
 
-    fn all(&self) -> [HWND; 14] {
+    fn all(&self) -> [HWND; 16] {
         [
             self.alter,
+            self.restart_explorer,
+            self.win_v,
             self.startup,
             self.retention,
             self.items,
@@ -192,25 +203,33 @@ struct Look {
     field_brush: HBRUSH,
 }
 
+/// Tema do sistema e as cores dos controles no DPI dado: as Configurações e
+/// a janela de falha do Win+V usam as mesmas.
+pub(crate) fn control_look(dpi: u32) -> (bool, ThemePalette, ControlColors) {
+    let appearance = SystemAppearance::read(dpi, false);
+    let palette = appearance.palette;
+    let surface = system_appearance::to_core(palette.surface);
+    let text = system_appearance::to_core(palette.text_primary);
+    let field = system_appearance::from_core(theme::subtle_hover_fill(surface, text));
+    let pressed = system_appearance::from_core(theme::composite_over(text, surface, 40));
+    let colors = ControlColors {
+        surface: palette.surface,
+        text: palette.text_primary,
+        dim: palette.text_dim,
+        border: palette.border,
+        field,
+        pressed,
+        accent: appearance.accent,
+        on_accent: palette.surface,
+        dpi,
+    };
+    (appearance.dark, palette, colors)
+}
+
 impl Look {
     fn load(dpi: u32) -> Look {
-        let appearance = SystemAppearance::read(dpi, false);
-        let palette = appearance.palette;
-        let surface = system_appearance::to_core(palette.surface);
-        let text = system_appearance::to_core(palette.text_primary);
-        let field = system_appearance::from_core(theme::subtle_hover_fill(surface, text));
-        let pressed = system_appearance::from_core(theme::composite_over(text, surface, 40));
-        let colors = ControlColors {
-            surface: palette.surface,
-            text: palette.text_primary,
-            dim: palette.text_dim,
-            border: palette.border,
-            field,
-            pressed,
-            accent: appearance.accent,
-            on_accent: palette.surface,
-            dpi,
-        };
+        let (dark, palette, colors) = control_look(dpi);
+        let field = colors.field;
         let base = message_font(dpi);
         // SAFETY: `base` é um `LOGFONTW` preenchido; as fontes são nossas e
         // apagadas em `Look::release`.
@@ -224,7 +243,7 @@ impl Look {
         let (surface_brush, field_brush) =
             unsafe { (CreateSolidBrush(palette.surface), CreateSolidBrush(field)) };
         Look {
-            dark: appearance.dark,
+            dark,
             palette,
             colors,
             dpi,
@@ -256,7 +275,15 @@ impl Look {
     }
 }
 
+/// Qual confirmação está aberta.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfirmKind {
+    Save,
+    RestartExplorer,
+}
+
 struct SettingsCtx {
+    win_v: Rc<WinVRuntime>,
     config: Rc<RefCell<Config>>,
     config_path: PathBuf,
     queue: Arc<dyn CaptureQueue<WorkItem>>,
@@ -276,6 +303,7 @@ struct SettingsCtx {
     mouse_at: Cell<Option<(HWND, POINT)>>,
     tooltip: RefCell<Option<Tooltip>>,
     confirm: Cell<Option<HWND>>,
+    confirm_kind: Cell<ConfirmKind>,
     last_focus: Cell<HWND>,
     /// Campo sendo reescrito pela janela: o `EN_CHANGE` dele não é do usuário.
     writing_fields: Cell<bool>,
@@ -302,13 +330,11 @@ enum Mode {
     Save,
 }
 
-pub fn open(
-    config: Rc<RefCell<Config>>,
-    config_path: PathBuf,
-    queue: Arc<dyn CaptureQueue<WorkItem>>,
-    history_hwnd: HWND,
-    registered_hotkey: Rc<Cell<Option<HotkeyCombo>>>,
-) {
+pub fn open(queue: Arc<dyn CaptureQueue<WorkItem>>, win_v: Rc<WinVRuntime>) {
+    let config = Rc::clone(win_v.config());
+    let config_path: PathBuf = win_v.config_path().clone();
+    let history_hwnd = win_v.history_hwnd();
+    let registered_hotkey = Rc::clone(win_v.registered_hotkey());
     if let Some((hwnd, ctx)) = open_window() {
         // Só traz para frente: o que estava pendente continua.
         // SAFETY: `hwnd` é a janela viva de `open_window`.
@@ -324,6 +350,10 @@ pub fn open(
         interpret_approval(startup_registry::read_startup_approved_raw().as_deref()),
     );
     let mut session = SettingsSession::open(&config.borrow(), startup);
+    session.sync_win_v(win_v.win_v_config(), win_v.status());
+    if win_v.restart_in_progress() {
+        session.explorer_restart_started();
+    }
     // SAFETY: `SendMessageW` síncrono para o Histórico, desta thread; para um
     // `HWND` nulo (testes) devolve 0, que é "nenhuma reescrita".
     let toggle =
@@ -333,6 +363,7 @@ pub fn open(
     }
 
     let ctx = Box::new(SettingsCtx {
+        win_v,
         config,
         config_path,
         queue,
@@ -348,12 +379,17 @@ pub fn open(
             combo: String::new(),
             description: String::new(),
             alter_enabled: true,
+            hint: None,
+            status_line: None,
+            restart_visible: false,
+            restart_enabled: false,
         }),
         error_line: Cell::new(None),
         hover_row: Cell::new(None),
         mouse_at: Cell::new(None),
         tooltip: RefCell::new(None),
         confirm: Cell::new(None),
+        confirm_kind: Cell::new(ConfirmKind::Save),
         last_focus: Cell::new(HWND::default()),
         writing_fields: Cell::new(false),
         painted: RefCell::new(Vec::new()),
@@ -423,6 +459,41 @@ pub fn cancel_if_open() {
     }
 }
 
+/// O estado do Win+V mudou fora da janela (reinício do Explorer, janela de
+/// falha): a linha de estado, o botão e a alternância acompanham.
+pub fn refresh_if_open() {
+    if let Some((_, ctx)) = open_window() {
+        sync_win_v(ctx);
+        sync_toggles(ctx);
+        refresh_hotkey_line(ctx);
+    }
+}
+
+/// O reinício pedido pelo botão terminou. Com as Configurações fechadas, um
+/// erro aparece numa caixa de mensagem.
+pub fn explorer_restart_finished(outcome: ExplorerRestartOutcome) {
+    let error = restart_error_line(outcome);
+    match open_window() {
+        Some((_, ctx)) => {
+            ctx.session.borrow_mut().explorer_restart_finished();
+            sync_win_v(ctx);
+            ctx.error_line.set(error);
+            refresh_hotkey_line(ctx);
+            redraw_all(ctx);
+        }
+        None => {
+            if let Some(message) = error {
+                crate::dialog::show_settings_error(message);
+            }
+        }
+    }
+}
+
+fn sync_win_v(ctx: &SettingsCtx) {
+    let (config, status) = (ctx.win_v.win_v_config(), ctx.win_v.status());
+    ctx.session.borrow_mut().sync_win_v(config, status);
+}
+
 /// Chamado pelo Histórico quando a reescrita da proteção termina.
 pub fn on_protection_finished() {
     if let Some((_, ctx)) = open_window() {
@@ -490,7 +561,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn message_font(dpi: u32) -> LOGFONTW {
+pub(crate) fn message_font(dpi: u32) -> LOGFONTW {
     let mut ncm = NONCLIENTMETRICSW {
         cbSize: core::mem::size_of::<NONCLIENTMETRICSW>() as u32,
         ..Default::default()
@@ -517,7 +588,7 @@ fn message_font(dpi: u32) -> LOGFONTW {
     }
 }
 
-fn font_height(font: HFONT) -> i32 {
+pub(crate) fn font_height(font: HFONT) -> i32 {
     // SAFETY: DC de memória criado e destruído aqui; a fonte volta a sair do
     // DC antes do `DeleteDC`.
     unsafe {
@@ -549,7 +620,7 @@ fn win_rect(r: CoreRect) -> RECT {
     }
 }
 
-fn measures(look: &Look) -> LayoutMeasures {
+fn measures(look: &Look, view: &HotkeyLineView) -> LayoutMeasures {
     let font = look.font;
     let width = |s: &str| text_metrics::width_with_font(font, s);
     let mut widest_label = 0;
@@ -560,6 +631,7 @@ fn measures(look: &Look) -> LayoutMeasures {
         text::STARTUP_BLOCKED,
         text::HOTKEY_ARMED,
         text::HOTKEY_PENDING,
+        text::WIN_V_HINT,
     ] {
         widest_label = widest_label.max(width(s));
     }
@@ -586,6 +658,9 @@ fn measures(look: &Look) -> LayoutMeasures {
         button_text_width,
         // SAFETY: sem pré-condição.
         scrollbar_width: unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, look.dpi) },
+        status_line: view.status_line.is_some(),
+        restart_button: view.restart_visible,
+        restart_text_width: width(text::BUTTON_RESTART_EXPLORER),
     }
 }
 
@@ -681,6 +756,14 @@ unsafe fn build(hwnd: HWND, ctx: &SettingsCtx) {
         Controls {
             content,
             alter: child(content, b, text::BUTTON_ALTER, button, ID_ALTER),
+            restart_explorer: child(
+                content,
+                b,
+                text::BUTTON_RESTART_EXPLORER,
+                button,
+                ID_RESTART_EXPLORER,
+            ),
+            win_v: child(content, t, text::WIN_V.name, WS_TABSTOP, ID_WIN_V),
             startup: child(content, t, text::STARTUP.name, WS_TABSTOP, ID_STARTUP),
             retention: child(content, e, "", numeric, ID_RETENTION),
             items: child(content, e, "", numeric, ID_MAX_ITEMS),
@@ -737,8 +820,10 @@ unsafe fn build(hwnd: HWND, ctx: &SettingsCtx) {
     apply_fonts(ctx);
     apply_control_themes(ctx);
     sync_controls(ctx);
-    relayout(ctx, Placement::Center);
+    // A linha do atalho antes do layout: a linha de estado e o botão de
+    // reiniciar mudam a altura.
     refresh_hotkey_line(ctx);
+    relayout(ctx, Placement::Center);
     refresh_apply(ctx);
 }
 
@@ -783,7 +868,7 @@ fn apply_control_themes(ctx: &SettingsCtx) {
 }
 
 /// Monitor e moldura da janela no DPI atual.
-fn work_area(hwnd: HWND) -> RECT {
+pub(crate) fn work_area(hwnd: HWND) -> RECT {
     // SAFETY: `hwnd` válido; `MONITOR_DEFAULTTONEAREST` sempre devolve um
     // monitor; a chamada só escreve `mi`.
     unsafe {
@@ -817,7 +902,7 @@ fn relayout(ctx: &SettingsCtx, placement: Placement) {
     let hwnd = ctx.hwnd.get();
     let (m, dpi) = {
         let look = ctx.look.borrow();
-        (measures(&look), look.dpi)
+        (measures(&look, &ctx.hotkey_view.borrow()), look.dpi)
     };
     let work = work_area(hwnd);
     let (fw, fh) = frame_size(dpi);
@@ -891,6 +976,8 @@ fn place_children(ctx: &SettingsCtx) {
     place(c.startup, shift(l.toggles[0]));
     place(c.secrets, shift(l.toggles[1]));
     place(c.protection, shift(l.toggles[2]));
+    place(c.win_v, shift(l.toggles[3]));
+    place(c.restart_explorer, shift(l.restart_button));
     for (i, (edit, _)) in c.numeric().into_iter().enumerate() {
         place(edit, shift(field_inner(l.numeric_edits[i], line, dpi)));
     }
@@ -985,7 +1072,7 @@ fn sync_controls(ctx: &SettingsCtx) {
 
 fn sync_toggles(ctx: &SettingsCtx) {
     let c = ctx.controls.get();
-    let (startup, secrets, protection, busy) = {
+    let (startup, secrets, protection, busy, win_v) = {
         let s = ctx.session.borrow();
         let d = s.draft();
         (
@@ -993,8 +1080,10 @@ fn sync_toggles(ctx: &SettingsCtx) {
             d.secret_detection,
             d.protection,
             s.protection_busy(),
+            d.win_v,
         )
     };
+    set_check(c.win_v, win_v);
     set_check(c.startup, startup);
     set_check(c.secrets, secrets);
     set_check(c.protection, protection);
@@ -1048,12 +1137,33 @@ fn refresh_hotkey_line(ctx: &SettingsCtx) {
         armed,
         owner == CaptureOwner::StandaloneDialog,
     );
-    let alter = ctx.controls.get().alter;
-    // SAFETY: `alter` é desta janela.
+    let c = ctx.controls.get();
+    // SAFETY: `alter` e o botão de reiniciar são desta janela; o foco não
+    // fica num botão escondido ou desabilitado.
     unsafe {
-        let _ = EnableWindow(alter, view.alter_enabled);
+        let _ = EnableWindow(c.alter, view.alter_enabled);
+        if !view.restart_enabled && GetFocus() == c.restart_explorer {
+            let _ = SetFocus(Some(c.alter));
+        }
+        let _ = EnableWindow(c.restart_explorer, view.restart_enabled);
+        let _ = ShowWindow(
+            c.restart_explorer,
+            if view.restart_visible {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
     }
+    let shape = |v: &HotkeyLineView| (v.status_line.is_some(), v.restart_visible);
+    let reshaped = shape(&view) != shape(&ctx.hotkey_view.borrow());
     *ctx.hotkey_view.borrow_mut() = view;
+    if reshaped && ctx.layout.get().client_width > 0 {
+        let mut r = RECT::default();
+        // SAFETY: `hwnd` é esta janela; só lê a posição.
+        let _ = unsafe { GetWindowRect(ctx.hwnd.get(), &mut r) };
+        relayout(ctx, Placement::At(r.left, r.top));
+    }
     invalidate_content(ctx);
 }
 
@@ -1100,6 +1210,9 @@ fn now_ms() -> u64 {
 fn execute(ctx: &SettingsCtx, effects: &[Effect], mode: Mode) -> SaveReport {
     let mut report = SaveReport::default();
     let mut push_settings = false;
+    // Ligado neste Salvar: se o `config.toml` falhar, o `V` não pode ficar
+    // sem a anotação de que é do duplicata.
+    let mut enabled = None;
     for effect in effects {
         match effect {
             Effect::SwapHotkey { to, .. } => {
@@ -1194,12 +1307,34 @@ fn execute(ctx: &SettingsCtx, effects: &[Effect], mode: Mode) -> SaveReport {
                     );
                 }
             }
+            Effect::SetReserve(to) => {
+                // O Win+V está em uso: a reserva só muda na configuração.
+                ctx.config.borrow_mut().hotkey = *to;
+            }
+            Effect::EnableWinV => match ctx.win_v.enable() {
+                Ok(switched) => enabled = Some(switched),
+                Err(_) => {
+                    log_event!(Level::WARN, LogFields::new("win_v_enable_failed"));
+                    report.win_v_failed = true;
+                }
+            },
+            Effect::DisableWinV => {
+                if ctx.win_v.disable().is_err() {
+                    log_event!(Level::WARN, LogFields::new("win_v_disable_failed"));
+                    report.win_v_failed = true;
+                }
+            }
             Effect::Persist => {
                 ctx.session
                     .borrow()
                     .in_effect()
                     .write_into(&mut ctx.config.borrow_mut());
                 report.persist_failed = ctx.config.borrow().persist(&ctx.config_path).is_err();
+                if let (true, Some(switched)) = (report.persist_failed, enabled) {
+                    // Só os campos do Win+V, ou a ligação desfeita; a tela
+                    // mostra só a falha do Salvar.
+                    report.win_v_failed = ctx.win_v.undo_unsaved_enable(switched);
+                }
             }
         }
     }
@@ -1246,26 +1381,64 @@ fn on_save(hwnd: HWND, ctx: &SettingsCtx) {
     refresh_apply(ctx);
     match step {
         SaveStep::Proceed(effects) => finish_save(hwnd, ctx, &effects),
-        SaveStep::Confirm(lines) => {
-            let (font, dpi) = {
-                let look = ctx.look.borrow();
-                (look.font, look.dpi)
-            };
-            hide_tooltip(ctx);
-            if let Some(confirm) = confirm::open(hwnd, lines, font, dpi) {
-                ctx.confirm.set(Some(confirm));
-                // SAFETY: `hwnd` é esta janela; a confirmação reabilita antes
-                // de se destruir.
-                unsafe {
-                    let _ = EnableWindow(hwnd, false);
-                }
-            }
+        SaveStep::Confirm(lines) => open_confirm(hwnd, ctx, lines, ConfirmKind::Save),
+    }
+}
+
+fn open_confirm(hwnd: HWND, ctx: &SettingsCtx, lines: Vec<String>, kind: ConfirmKind) {
+    let (font, dpi) = {
+        let look = ctx.look.borrow();
+        (look.font, look.dpi)
+    };
+    let primary = match kind {
+        ConfirmKind::Save => text::BUTTON_SAVE,
+        ConfirmKind::RestartExplorer => text::BUTTON_RESTART,
+    };
+    hide_tooltip(ctx);
+    if let Some(confirm) = confirm::open(hwnd, lines, font, dpi, primary) {
+        ctx.confirm.set(Some(confirm));
+        ctx.confirm_kind.set(kind);
+        // SAFETY: `hwnd` é esta janela; a confirmação reabilita antes de se
+        // destruir.
+        unsafe {
+            let _ = EnableWindow(hwnd, false);
         }
     }
 }
 
+fn on_restart_explorer(hwnd: HWND, ctx: &SettingsCtx) {
+    let lines = ctx.session.borrow().begin_explorer_restart();
+    if let Some(lines) = lines {
+        open_confirm(hwnd, ctx, lines, ConfirmKind::RestartExplorer);
+    }
+}
+
+/// "Reiniciar" confirmado: a thread do reinício avisa a bandeja no fim.
+fn start_explorer_restart(ctx: &SettingsCtx) {
+    // O Explorer pode ter voltado por outro caminho com a confirmação
+    // aberta: aí o botão já não vale e nada é reiniciado.
+    sync_win_v(ctx);
+    if ctx.session.borrow().begin_explorer_restart().is_none() {
+        refresh_hotkey_line(ctx);
+        return;
+    }
+    let Some(notify) = tray::window() else {
+        ctx.error_line
+            .set(restart_error_line(ExplorerRestartOutcome::Refused));
+        redraw_all(ctx);
+        return;
+    };
+    ctx.session.borrow_mut().explorer_restart_started();
+    let returned = explorer_restart::spawn(notify, tray::WM_EXPLORER_RESTART_DONE);
+    ctx.win_v.restart_started(returned);
+    ctx.error_line.set(None);
+    refresh_hotkey_line(ctx);
+    redraw_all(ctx);
+}
+
 fn finish_save(hwnd: HWND, ctx: &SettingsCtx, effects: &[Effect]) {
     let report = execute(ctx, effects, Mode::Save);
+    sync_win_v(ctx);
     let outcome = ctx.session.borrow_mut().finish_save(report);
     match outcome {
         SaveOutcome::Close => {}
@@ -1291,15 +1464,27 @@ fn on_confirm_result(hwnd: HWND, ctx: &SettingsCtx, confirmed: bool) {
         let _ = EnableWindow(hwnd, true);
         let _ = SetForegroundWindow(hwnd);
     }
-    if confirmed {
-        let effects = ctx.session.borrow_mut().confirm_save();
-        finish_save(hwnd, ctx, &effects);
-    } else {
-        ctx.session.borrow_mut().back();
-        refresh_apply(ctx);
-        // SAFETY: `hwnd` é esta janela, de volta ao primeiro plano.
-        unsafe {
-            let _ = SetFocus(Some(ctx.controls.get().save));
+    let kind = ctx.confirm_kind.get();
+    match (kind, confirmed) {
+        (ConfirmKind::Save, true) => {
+            let effects = ctx.session.borrow_mut().confirm_save();
+            finish_save(hwnd, ctx, &effects);
+        }
+        (ConfirmKind::Save, false) => {
+            ctx.session.borrow_mut().back();
+            refresh_apply(ctx);
+            // SAFETY: `hwnd` é esta janela, de volta ao primeiro plano.
+            unsafe {
+                let _ = SetFocus(Some(ctx.controls.get().save));
+            }
+        }
+        (ConfirmKind::RestartExplorer, true) => start_explorer_restart(ctx),
+        // "Voltar": nada muda.
+        (ConfirmKind::RestartExplorer, false) => {
+            // SAFETY: `hwnd` é esta janela, de volta ao primeiro plano.
+            unsafe {
+                let _ = SetFocus(Some(ctx.controls.get().restart_explorer));
+            }
         }
     }
 }
@@ -1466,6 +1651,12 @@ fn on_command(hwnd: HWND, ctx: &SettingsCtx, wparam: WPARAM) {
     }
     match id {
         ID_ALTER => on_alter(ctx),
+        ID_RESTART_EXPLORER => on_restart_explorer(hwnd, ctx),
+        ID_WIN_V => {
+            // Só no Salvar: não habilita o Aplicar.
+            ctx.session.borrow_mut().set_win_v(is_checked(c.win_v));
+            refresh_apply(ctx);
+        }
         ID_STARTUP => {
             ctx.session.borrow_mut().set_startup(is_checked(c.startup));
             refresh_apply(ctx);
@@ -1520,7 +1711,7 @@ fn paint(hwnd: HWND, ctx: &SettingsCtx) {
                 hdc,
                 &mut buf,
                 &mut rc,
-                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+                DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS,
             );
             SelectObject(hdc, old);
         }
@@ -1760,6 +1951,16 @@ pub fn scroll_position() -> Option<i32> {
 #[doc(hidden)]
 pub fn hotkey_description() -> Option<String> {
     open_window().map(|(_, ctx)| ctx.hotkey_view.borrow().description.clone())
+}
+
+#[doc(hidden)]
+pub fn win_v_status_line() -> Option<String> {
+    open_window().and_then(|(_, ctx)| ctx.hotkey_view.borrow().status_line.clone())
+}
+
+#[doc(hidden)]
+pub fn error_line() -> Option<&'static str> {
+    open_window().and_then(|(_, ctx)| ctx.error_line.get())
 }
 
 #[doc(hidden)]

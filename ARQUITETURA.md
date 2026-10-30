@@ -175,6 +175,29 @@ medição sugere: atende os pedidos de render dos outros programas da sessão e
 não atende o do duplicata a tempo. Ele não reproduz o PowerShell real; a prova
 causal é o aceite manual, com o `clipboard_trace` gravando junto.
 
+**O duplicata reinicia o Explorer, mas nunca encerra processo à força.** A
+opção "Abrir com Win+V" inclui `V` no `DisabledHotkeys` do Explorer, que só
+relê o valor ao iniciar. O reinício acontece só pelo botão "Reiniciar o
+Windows Explorer agora" das Configurações, depois de uma confirmação, e pelo
+Restart Manager sem a flag de encerramento forçado: o Explorer pode recusar
+fechar, e então nada muda. A espera de até 10 segundos pela volta dele roda
+numa thread criada pelo clique, que só existe durante a ação e termina em
+seguida, sem `WM_TIMER` — a message loop continua dormindo em `GetMessageW`,
+e o "zero despertares em ociosidade" vale. Se, passado o prazo, não houver
+shell, o duplicata abre `%WINDIR%\explorer.exe` pelo caminho completo: é o
+único programa que ele executa. A CI barra `RmForceShutdown` junto com
+`TerminateProcess`.
+
+**O reinício do Explorer é medido pela hora de início do processo do
+shell.** O `TaskbarCreated` é como o duplicata percebe que o Explorer voltou,
+sem timer nem polling, mas ele também chega sem reinício (troca de DPI ou de
+tema). A hora de criação do processo dono da janela do shell, guardada no
+`config.toml` a cada Salvar da opção, diz se é outro Explorer: igual, o
+`TaskbarCreated` não muda nada; diferente, o duplicata tenta o `Win+V` e, se
+o Windows não o liberou, abre a janela de falha. Sem conseguir ler a hora, o
+estado fica "aguardando", sem janela. `tests/win_v.rs` e
+`tests/win_v_explorer.rs` do `duplicata-core` prendem a regra.
+
 ## Build e verificação
 
 ```powershell

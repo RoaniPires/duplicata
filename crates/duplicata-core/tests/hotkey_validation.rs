@@ -30,7 +30,7 @@ fn any_combination_with_win_is_rejected() {
         };
         assert_eq!(
             validate_hotkey(&combo),
-            Err(HotkeyRejection::ReservedSystemCombo),
+            Err(HotkeyRejection::WinReserved),
             "modifiers={base:#x}|MOD_WIN deveria ser rejeitado"
         );
     }
@@ -178,4 +178,10 @@ fn serialization_round_trip_is_untouched_by_the_new_display_fn() {
         HotkeyCombo::parse("ctrl+shift+v"),
         Some(HotkeyCombo::DEFAULT)
     );
+}
+
+#[test]
+fn win_f8_is_win_reserved() {
+    let combo = HotkeyCombo::parse("win+f8").expect("sintaxe válida");
+    assert_eq!(validate_hotkey(&combo), Err(HotkeyRejection::WinReserved));
 }

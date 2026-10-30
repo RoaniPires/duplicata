@@ -31,7 +31,7 @@ use duplicata_core::row_layout::scale_px;
 pub(super) const TOGGLE_CLASS: PCWSTR = windows::core::w!("duplicata_settings_toggle");
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct ControlColors {
+pub(crate) struct ControlColors {
     pub surface: COLORREF,
     pub text: COLORREF,
     pub dim: COLORREF,
@@ -54,7 +54,7 @@ pub(super) fn set_colors(colors: ControlColors) {
     COLORS.with(|c| c.set(colors));
 }
 
-pub(super) fn colors() -> ControlColors {
+pub(crate) fn colors() -> ControlColors {
     COLORS.with(Cell::get)
 }
 
@@ -126,8 +126,17 @@ pub(super) unsafe fn paint_field_box(hdc: HDC, r: &RECT) {
 /// # Safety
 /// `dis` é o `DRAWITEMSTRUCT` do `WM_DRAWITEM`, com `hDC` válido; `font` é
 /// válida ou inválida (a do DC fica).
-pub(super) unsafe fn draw_button(dis: &DRAWITEMSTRUCT, font: HFONT) {
-    let c = colors();
+pub(crate) unsafe fn draw_button(dis: &DRAWITEMSTRUCT, font: HFONT) {
+    // SAFETY: contrato da função.
+    unsafe { draw_button_with(dis, font, colors()) }
+}
+
+/// [`draw_button`] com cores próprias: a janela de falha do Win+V tem o DPI
+/// dela, e as cores das Configurações (de outro DPI) ficam intocadas.
+///
+/// # Safety
+/// O mesmo de [`draw_button`].
+pub(crate) unsafe fn draw_button_with(dis: &DRAWITEMSTRUCT, font: HFONT, c: ControlColors) {
     let hdc = dis.hDC;
     let r = dis.rcItem;
     let disabled = dis.itemState.0 & ODS_DISABLED.0 != 0;

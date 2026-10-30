@@ -1,14 +1,12 @@
-use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 
 use duplicata_core::heuristic_recovery::{recover_on_notification_click, RecoverOutcome};
-use duplicata_core::{
-    log_event, BackoffPolicy, CaptureQueue, Config, HotkeyCombo, InitError, LogFields, WorkItem,
-};
+use duplicata_core::win_v::open_conflict_after_return;
+use duplicata_core::{log_event, BackoffPolicy, CaptureQueue, InitError, LogFields, WorkItem};
 use tracing::Level;
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -33,17 +31,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app_icon;
 
+use crate::explorer_restart;
+use crate::hotkey_dialog;
 use crate::menu_icon;
 use crate::message_loop;
 use crate::settings_dialog;
 use crate::system_appearance::SystemAppearance;
 use crate::win_clipboard::WinClipboard;
+use crate::win_v_dialog;
+use crate::win_v_runtime::WinVRuntime;
 use crate::WinClock;
 
 pub(crate) const CLASS_NAME: PCWSTR = windows::core::w!("duplicata_tray_icon");
 const TRAY_UID: u32 = 1;
 const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_HEURISTIC_REJECTED: u32 = WM_APP + 2;
+/// Fim do reinício do Explorer pedido pelo botão das Configurações; o
+/// resultado vem no `WPARAM` (`explorer_restart::outcome_from_wparam`).
+pub(crate) const WM_EXPLORER_RESTART_DONE: u32 = WM_APP + 3;
 pub(crate) const ID_TRAY_EXIT: usize = 2;
 const ID_TRAY_SETTINGS: usize = 3;
 const ID_TRAY_CHECK_UPDATE: usize = 4;
@@ -63,12 +68,21 @@ fn wm_taskbarcreated() -> u32 {
 
 struct TrayCtx {
     icon: HICON,
-    history_hwnd: HWND,
-    config: Rc<RefCell<Config>>,
-    config_path: PathBuf,
     queue: Arc<dyn CaptureQueue<WorkItem>>,
-    registered_hotkey: Rc<Cell<Option<HotkeyCombo>>>,
+    win_v: Rc<WinVRuntime>,
     version: &'static str,
+}
+
+thread_local! {
+    static TRAY_HWND: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+/// A janela da bandeja, que recebe o `TaskbarCreated` e o fim do reinício
+/// do Explorer.
+pub(crate) fn window() -> Option<HWND> {
+    TRAY_HWND
+        .with(Cell::get)
+        .map(|bits| HWND(bits as *mut core::ffi::c_void))
 }
 
 pub struct Tray {
@@ -78,12 +92,9 @@ pub struct Tray {
 
 impl Tray {
     pub fn create(
-        history_hwnd: HWND,
-        config: Rc<RefCell<Config>>,
-        config_path: PathBuf,
         queue: Arc<dyn CaptureQueue<WorkItem>>,
         heuristic_rx: mpsc::Receiver<()>,
-        registered_hotkey: Rc<Cell<Option<HotkeyCombo>>>,
+        win_v: Rc<WinVRuntime>,
         version: &'static str,
     ) -> Result<Self, InitError> {
         let _ = wm_taskbarcreated();
@@ -110,11 +121,8 @@ impl Tray {
                 .ok_or(InitError::Tray)?;
             let mut ctx = Box::new(TrayCtx {
                 icon,
-                history_hwnd,
-                config,
-                config_path,
                 queue,
-                registered_hotkey,
+                win_v,
                 version,
             });
             let ctx_ptr: *mut TrayCtx = ctx.as_mut();
@@ -141,6 +149,7 @@ impl Tray {
             }
 
             let _ = spawn_heuristic_bridge(hwnd, heuristic_rx);
+            TRAY_HWND.with(|c| c.set(Some(hwnd.0 as isize)));
 
             Ok(Tray { hwnd, _ctx: ctx })
         }
@@ -159,6 +168,11 @@ impl Drop for Tray {
             remove_icon(self.hwnd);
             let _ = DestroyWindow(self.hwnd);
         }
+        TRAY_HWND.with(|c| {
+            if c.get() == Some(self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
     }
 }
 
@@ -293,7 +307,7 @@ fn handle_heuristic_recovery_click(hwnd: HWND) {
         &WinClipboard,
         &WinClock,
         &BackoffPolicy::production(),
-        &ctx.config.borrow(),
+        &ctx.win_v.config().borrow(),
         ctx.queue.as_ref(),
     );
     if let RecoverOutcome::Failed(_) = outcome {
@@ -350,13 +364,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 message_loop::post_quit();
             } else if id == ID_TRAY_SETTINGS {
                 if let Some(ctx) = tray_ctx(hwnd) {
-                    settings_dialog::open(
-                        Rc::clone(&ctx.config),
-                        ctx.config_path.clone(),
-                        Arc::clone(&ctx.queue),
-                        ctx.history_hwnd,
-                        Rc::clone(&ctx.registered_hotkey),
-                    );
+                    settings_dialog::open(Arc::clone(&ctx.queue), Rc::clone(&ctx.win_v));
                 }
             } else if id == ID_TRAY_CHECK_UPDATE {
                 open_releases_page();
@@ -377,12 +385,47 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let ctx = tray_ctx(hwnd);
             if let Some(ctx) = ctx {
                 let _ = add_icon(hwnd, ctx.icon);
+                explorer_returned(&ctx.win_v);
             }
+            LRESULT(0)
+        }
+        WM_EXPLORER_RESTART_DONE => {
+            if let Some(ctx) = tray_ctx(hwnd) {
+                ctx.win_v.restart_finished();
+            }
+            settings_dialog::explorer_restart_finished(explorer_restart::outcome_from_wparam(
+                wparam.0,
+            ));
             LRESULT(0)
         }
         // SAFETY: repassa mensagens não tratadas ao handler padrão.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// O Explorer voltou (ou só recriou a barra): o núcleo decide e aqui só se
+/// aplica. Sem timer e sem gancho: é o `TaskbarCreated` que acorda.
+fn explorer_returned(win_v: &Rc<WinVRuntime>) {
+    let reaction = win_v.explorer_returned();
+    if reaction.close_failure_window {
+        win_v_dialog::close();
+    }
+    if reaction.show_failure_window {
+        win_v_dialog::open(Rc::clone(win_v));
+    } else if open_conflict_after_return(
+        &reaction,
+        win_v_dialog::is_open(),
+        hotkey_dialog::conflict_window().is_some(),
+    ) {
+        hotkey_dialog::open_after_conflict(
+            win_v.history_hwnd(),
+            win_v.reserve(),
+            Rc::clone(win_v.config()),
+            win_v.config_path().clone(),
+            Rc::clone(win_v.registered_hotkey()),
+        );
+    }
+    settings_dialog::refresh_if_open();
 }
 
 fn tray_ctx(hwnd: HWND) -> Option<&'static TrayCtx> {

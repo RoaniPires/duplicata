@@ -40,6 +40,8 @@ pub mod theme;
 pub mod thumbnail;
 pub mod translucency;
 pub mod uninstall_data;
+pub mod win_v;
+pub mod win_v_layout;
 pub mod work_item;
 pub mod worker;
 

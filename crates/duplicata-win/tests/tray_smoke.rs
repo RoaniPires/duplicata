@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc};
 
+use duplicata_core::testsupport::{FakeDisabledHotkeys, FixedExplorer};
 use duplicata_core::{CaptureQueue, Config, WorkItem};
+use duplicata_win::win_v_runtime::WinVRuntime;
 use duplicata_win::Tray;
 
 #[test]
@@ -17,16 +19,16 @@ fn create_adds_the_icon_with_no_taskbar_entry_and_destroy_removes_it() {
     )));
     let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(duplicata_core::ByteBudgetQueue::new());
     let (_heuristic_tx, heuristic_rx) = mpsc::channel();
-    let tray = Tray::create(
+    let win_v = WinVRuntime::new(
         windows::Win32::Foundation::HWND::default(),
         config,
         PathBuf::from("config.toml"),
-        queue,
-        heuristic_rx,
         Rc::new(Cell::new(None)),
-        "0.0.0-teste",
-    )
-    .expect("Shell_NotifyIcon(NIM_ADD) deve funcionar numa sessão gráfica");
+        Box::new(FakeDisabledHotkeys::default()),
+        Box::new(FixedExplorer(None)),
+    );
+    let tray = Tray::create(queue, heuristic_rx, win_v, "0.0.0-teste")
+        .expect("Shell_NotifyIcon(NIM_ADD) deve funcionar numa sessão gráfica");
     println!("ícone de bandeja criado — confira visualmente a bandeja do sistema (e que nada aparece no Alt+Tab)");
 
     tray.destroy();

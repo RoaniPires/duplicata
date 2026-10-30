@@ -17,6 +17,7 @@ fn measures(dpi: u32) -> LayoutMeasures {
         numeric_text_width: scale_px(70, dpi),
         button_text_width: scale_px(52, dpi),
         scrollbar_width: scale_px(17, dpi),
+        ..Default::default()
     }
 }
 
@@ -139,20 +140,20 @@ fn rows_follow_the_visual_order_with_the_list_under_its_row() {
     let l = layout(96, 2000);
     let [general, history, privacy] = l.titles;
     assert!(general.bottom <= l.rows[0].row.top);
-    assert!(l.rows[1].row.bottom <= history.top);
-    assert!(history.bottom <= l.rows[2].row.top);
-    assert!(l.rows[4].row.bottom <= privacy.top);
-    assert!(privacy.bottom <= l.rows[5].row.top);
+    assert!(l.rows[2].row.bottom <= history.top);
+    assert!(history.bottom <= l.rows[3].row.top);
+    assert!(l.rows[5].row.bottom <= privacy.top);
+    assert!(privacy.bottom <= l.rows[6].row.top);
     for pair in l.rows.windows(2) {
         assert!(pair[0].row.bottom <= pair[1].row.top);
     }
-    assert!(l.rows[5].row.bottom <= l.list.top);
+    assert!(l.rows[6].row.bottom <= l.list.top);
     assert!(l.list.bottom <= l.list_edit.top);
     assert_eq!(l.list_edit.top, l.add_button.top);
     assert!(l.list_edit.right <= l.add_button.left);
     assert!(l.add_button.bottom <= l.remove_button.top);
-    assert!(l.remove_button.bottom <= l.rows[6].row.top);
-    assert!(l.rows[7].row.bottom <= l.content_height);
+    assert!(l.remove_button.bottom <= l.rows[7].row.top);
+    assert!(l.rows[8].row.bottom <= l.content_height);
     for (i, row) in l.rows.iter().enumerate() {
         let mid = (row.row.top + row.row.bottom) / 2;
         assert_eq!(row_at(&l, mid), Some(i));
@@ -171,4 +172,70 @@ fn a_control_below_the_visible_area_scrolls_into_view() {
         "não passa do fim"
     );
     assert_eq!(max_scroll(100, 50), 0);
+}
+
+fn with_win_v(dpi: u32, status_line: bool, restart_button: bool) -> SettingsLayout {
+    let m = LayoutMeasures {
+        status_line,
+        restart_button,
+        restart_text_width: scale_px(210, dpi),
+        ..measures(dpi)
+    };
+    settings_layout(&m, 2000)
+}
+
+#[test]
+fn the_win_v_option_is_its_own_row_right_under_the_hotkey() {
+    for dpi in [96, 144, 192] {
+        let l = with_win_v(dpi, false, false);
+        assert_eq!(l.rows[0].row.bottom, l.rows[1].row.top, "{dpi} dpi");
+        assert_eq!(l.rows[1].control, l.toggles[3]);
+        assert!(inside(l.toggles[3], l.rows[1].row));
+        assert_eq!(l.toggles[3].right, l.rows[0].control.right);
+    }
+}
+
+#[test]
+fn without_anything_to_say_there_is_no_status_line_nor_button() {
+    let l = with_win_v(96, false, false);
+    assert_eq!(l.status_line, Rect::default());
+    assert_eq!(l.restart_button, Rect::default());
+}
+
+#[test]
+fn the_status_line_and_the_button_sit_between_the_hotkey_and_the_option() {
+    for dpi in [96, 144, 192] {
+        let m = measures(dpi);
+        let l = with_win_v(dpi, true, true);
+        let (status, button) = (l.status_line, l.restart_button);
+        assert!(l.rows[0].row.bottom <= status.top, "{dpi} dpi");
+        assert_eq!(status.bottom - status.top, 2 * m.line_height);
+        assert_eq!(status.left, l.rows[0].name.left);
+        assert_eq!(status.right, l.rows[0].control.right);
+        assert!(status.bottom <= button.top);
+        assert!(button.bottom <= l.rows[1].row.top);
+        assert_eq!(button.left, status.left);
+        assert!(width(button) >= scale_px(210, dpi), "cabe o texto do botão");
+        assert_eq!(row_at(&l, (status.top + status.bottom) / 2), None);
+        assert_eq!(row_at(&l, (button.top + button.bottom) / 2), None);
+
+        let only_line = with_win_v(dpi, true, false);
+        assert_eq!(only_line.restart_button, Rect::default());
+        assert!(only_line.status_line.bottom <= only_line.rows[1].row.top);
+        assert!(only_line.content_height < l.content_height);
+        assert!(with_win_v(dpi, false, false).content_height < only_line.content_height);
+    }
+}
+
+#[test]
+fn the_error_line_has_room_for_two_lines() {
+    for dpi in [96, 144, 192] {
+        let m = measures(dpi);
+        let l = settings_layout(&m, 2000);
+        assert_eq!(
+            l.error_line.bottom - l.error_line.top,
+            2 * m.line_height,
+            "as mensagens do reinício do Explorer são longas ({dpi} dpi)"
+        );
+    }
 }

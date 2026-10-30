@@ -12,6 +12,7 @@ use crate::settings_input::{
 };
 use crate::settings_text as text;
 use crate::startup::{Approval, StartupState};
+use crate::win_v::{WinVConfig, WinVStatus};
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
@@ -46,6 +47,8 @@ pub struct SettingsValues {
     pub blocked_programs: Vec<String>,
     pub secret_detection: bool,
     pub protection: bool,
+    /// "Abrir com Win+V"; muda só pelo Salvar confirmado.
+    pub win_v: bool,
 }
 
 impl SettingsValues {
@@ -60,6 +63,7 @@ impl SettingsValues {
             blocked_programs: cfg.blocked_programs.clone(),
             secret_detection: cfg.heuristic_secret_detection,
             protection: cfg.encryption_enabled,
+            win_v: cfg.open_with_win_v,
         }
     }
 
@@ -86,6 +90,7 @@ pub enum Setting {
     BlockedPrograms,
     SecretDetection,
     Protection,
+    WinV,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +101,9 @@ pub enum ChangeKind {
     SaveOnly,
     /// Só no Salvar, com confirmação.
     Irreversible,
+    /// Só no Salvar, com confirmação, mas reversível (o Win+V): a
+    /// confirmação não diz que não pode ser desfeito.
+    SaveOnlyConfirmed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,13 +134,20 @@ pub enum Effect {
     },
     SetMaxPinned(u32),
     ToggleProtection(bool),
+    /// Liga o Win+V (registro, atalhos e campos do `config.toml`).
+    EnableWinV,
+    DisableWinV,
+    /// Troca a reserva sem registrar: o Win+V está em uso.
+    SetReserve(HotkeyCombo),
     /// Gravar o arquivo de configuração; sempre o último efeito do Salvar.
     Persist,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveStep {
-    /// Linhas da confirmação, a última é [`text::CANNOT_UNDO`].
+    /// Linhas da confirmação: as irreversíveis terminam em
+    /// [`text::CANNOT_UNDO`]; o bloco do Win+V vem por último, separado por
+    /// uma linha vazia quando há irreversíveis.
     Confirm(Vec<String>),
     Proceed(Vec<Effect>),
 }
@@ -141,6 +156,8 @@ pub enum SaveStep {
 pub struct SaveReport {
     pub hotkey_failed: bool,
     pub persist_failed: bool,
+    /// O `DisabledHotkeys` não pôde ser gravado.
+    pub win_v_failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +171,12 @@ pub struct HotkeyLineView {
     pub combo: String,
     pub description: String,
     pub alter_enabled: bool,
+    /// Dica do Win+V enquanto o campo espera a combinação.
+    pub hint: Option<&'static str>,
+    /// Linha de estado do Win+V, abaixo do atalho.
+    pub status_line: Option<String>,
+    pub restart_visible: bool,
+    pub restart_enabled: bool,
 }
 
 /// Texto do campo e o último valor que a janela escreveu nele (o "anterior"
@@ -189,6 +212,9 @@ pub struct SettingsSession {
     protection_busy: bool,
     hotkey_message: Option<String>,
     last_swap: Option<(HotkeyCombo, HotkeyCombo)>,
+    win_v_status: WinVStatus,
+    win_v_ours: bool,
+    restart_in_progress: bool,
 }
 
 impl SettingsSession {
@@ -205,6 +231,9 @@ impl SettingsSession {
             protection_busy: false,
             hotkey_message: None,
             last_swap: None,
+            win_v_status: WinVStatus::Off,
+            win_v_ours: cfg.win_v_added_v,
+            restart_in_progress: false,
         }
     }
 
@@ -345,6 +374,9 @@ impl SettingsSession {
         if d.protection != e.protection {
             out.push((Setting::Protection, SaveOnly));
         }
+        if d.win_v != e.win_v {
+            out.push((Setting::WinV, SaveOnlyConfirmed));
+        }
         out
     }
 
@@ -360,11 +392,16 @@ impl SettingsSession {
     fn transition(&mut self, from: &SettingsValues, to: &SettingsValues) -> Vec<Effect> {
         let mut out = Vec::new();
         if from.hotkey != to.hotkey {
-            self.last_swap = Some((from.hotkey, to.hotkey));
-            out.push(Effect::SwapHotkey {
-                from: from.hotkey,
-                to: to.hotkey,
-            });
+            if self.win_v_status == WinVStatus::Active {
+                // Com o Win+V em uso a reserva não fica registrada.
+                out.push(Effect::SetReserve(to.hotkey));
+            } else {
+                self.last_swap = Some((from.hotkey, to.hotkey));
+                out.push(Effect::SwapHotkey {
+                    from: from.hotkey,
+                    to: to.hotkey,
+                });
+            }
         }
         if from.startup != to.startup {
             out.push(Effect::SetStartup {
@@ -392,6 +429,13 @@ impl SettingsSession {
         if from.protection != to.protection {
             out.push(Effect::ToggleProtection(to.protection));
         }
+        if from.win_v != to.win_v {
+            out.push(if to.win_v {
+                Effect::EnableWinV
+            } else {
+                Effect::DisableWinV
+            });
+        }
         out
     }
 
@@ -412,7 +456,7 @@ impl SettingsSession {
                 Setting::MaxPinned => next.max_pinned = d.max_pinned,
                 Setting::BlockedPrograms => next.blocked_programs = d.blocked_programs.clone(),
                 Setting::SecretDetection => next.secret_detection = d.secret_detection,
-                Setting::Protection => {}
+                Setting::Protection | Setting::WinV => {}
             }
         }
         self.rewrite_fields();
@@ -458,11 +502,40 @@ impl SettingsSession {
         if irreversible.contains(&Setting::Startup) {
             lines.push(text::UNBLOCK_STARTUP_LINE.to_string());
         }
+        if !lines.is_empty() {
+            lines.push(text::CANNOT_UNDO.to_string());
+        }
+        // O Win+V é reversível: vem depois, separado, sem a frase acima.
+        let win_v = self.win_v_lines();
+        if !win_v.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.extend(win_v);
+        }
         if lines.is_empty() {
             return SaveStep::Proceed(self.confirm_save());
         }
-        lines.push(text::CANNOT_UNDO.to_string());
         SaveStep::Confirm(lines)
+    }
+
+    fn win_v_lines(&self) -> Vec<String> {
+        let (draft, effect) = (self.draft.win_v, self.in_effect.win_v);
+        if draft == effect {
+            Vec::new()
+        } else if draft {
+            vec![
+                text::WIN_V_ENABLE_PANEL_LINE.to_string(),
+                text::win_v_enable_when(&format_hotkey(&self.draft.hotkey)),
+            ]
+        } else if self.win_v_ours {
+            vec![text::WIN_V_DISABLE_LINE.to_string()]
+        } else {
+            vec![
+                text::WIN_V_DISABLE_NOW_LINE.to_string(),
+                text::WIN_V_WAS_DISABLED_BEFORE.to_string(),
+            ]
+        }
     }
 
     /// Tudo o que está pendente, com a gravação por último.
@@ -487,15 +560,25 @@ impl SettingsSession {
         if report.hotkey_failed {
             self.hotkey_effect_failed();
         }
-        if !report.hotkey_failed && !report.persist_failed {
+        if report.win_v_failed {
+            // O registro não mudou: a opção volta ao que era.
+            self.in_effect.win_v = self.saved.win_v;
+            self.draft.win_v = self.saved.win_v;
+        }
+        if !report.hotkey_failed && !report.persist_failed && !report.win_v_failed {
             return SaveOutcome::Close;
         }
         // O que o Salvar pôs em efeito vira o ponto de partida: um Cancelar
         // depois só fecha.
         self.saved = self.in_effect.clone();
-        SaveOutcome::StayOpen {
-            error_line: report.persist_failed.then_some(text::SAVE_FAILED),
-        }
+        let error_line = if report.persist_failed {
+            Some(text::SAVE_FAILED)
+        } else if report.win_v_failed {
+            Some(text::WIN_V_REGISTRY_FAILED)
+        } else {
+            None
+        };
+        SaveOutcome::StayOpen { error_line }
     }
 
     pub fn hotkey_line(
@@ -513,7 +596,7 @@ impl SettingsSession {
             (text::HOTKEY_ARMED.to_string(), true)
         } else if self.has_pending_hotkey() {
             (text::HOTKEY_PENDING.to_string(), true)
-        } else if registered.is_none() {
+        } else if registered.is_none() && self.win_v_status != WinVStatus::Active {
             (text::hotkey_none_active(&combo), true)
         } else {
             (text::HOTKEY.description.to_string(), true)
@@ -522,6 +605,21 @@ impl SettingsSession {
             combo,
             description,
             alter_enabled,
+            hint: (armed && !standalone_open).then_some(text::WIN_V_HINT),
+            status_line: self.win_v_status_line(),
+            restart_visible: self.win_v_status.awaits_restart(),
+            restart_enabled: self.win_v_status.awaits_restart() && !self.restart_in_progress,
+        }
+    }
+
+    fn win_v_status_line(&self) -> Option<String> {
+        let reserve = format_hotkey(&self.in_effect.hotkey);
+        match self.win_v_status {
+            WinVStatus::Off => None,
+            WinVStatus::AwaitingRestart => Some(text::win_v_awaiting(&reserve)),
+            WinVStatus::Active => Some(text::win_v_active(&reserve)),
+            WinVStatus::NotReleased => Some(text::win_v_not_released(&reserve)),
+            WinVStatus::OffAwaitingReturn => Some(text::WIN_V_OFF_AWAITING_RETURN.to_string()),
         }
     }
 
@@ -575,6 +673,41 @@ impl SettingsSession {
 
     pub fn protection_busy(&self) -> bool {
         self.protection_busy
+    }
+
+    pub fn set_win_v(&mut self, on: bool) {
+        self.draft.win_v = on;
+    }
+
+    /// O estado do Win+V mudou fora da janela (inicialização, reinício do
+    /// Explorer, janela de falha) ou depois de um Salvar.
+    pub fn sync_win_v(&mut self, config: WinVConfig, status: WinVStatus) {
+        if self.draft.win_v == self.in_effect.win_v {
+            self.draft.win_v = config.on;
+        }
+        self.saved.win_v = config.on;
+        self.in_effect.win_v = config.on;
+        self.win_v_ours = config.v_ours;
+        self.win_v_status = status;
+    }
+
+    pub fn win_v_status(&self) -> WinVStatus {
+        self.win_v_status
+    }
+
+    /// Confirmação do botão "Reiniciar o Windows Explorer agora"; `None`
+    /// quando o botão não vale agora.
+    pub fn begin_explorer_restart(&self) -> Option<Vec<String>> {
+        (self.win_v_status.awaits_restart() && !self.restart_in_progress)
+            .then(|| vec![text::RESTART_EXPLORER_CONFIRM.to_string()])
+    }
+
+    pub fn explorer_restart_started(&mut self) {
+        self.restart_in_progress = true;
+    }
+
+    pub fn explorer_restart_finished(&mut self) {
+        self.restart_in_progress = false;
     }
 }
 

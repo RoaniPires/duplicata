@@ -1,6 +1,8 @@
 //! Textos da janela de Configurações e da confirmação do Salvar, num lugar
 //! só para que o teste confira cada um contra a especificação.
 
+use crate::hotkey::{format_hotkey, HotkeyCombo, HotkeyRejection};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptionText {
     pub name: &'static str,
@@ -63,8 +65,8 @@ pub const PROTECTION: OptionText = OptionText {
 };
 
 /// As opções na ordem em que aparecem na janela.
-pub const OPTIONS: [OptionText; 8] = [
-    HOTKEY, STARTUP, RETENTION, MAX_ITEMS, MAX_PINNED, BLOCKLIST, SECRETS, PROTECTION,
+pub const OPTIONS: [OptionText; 9] = [
+    HOTKEY, WIN_V, STARTUP, RETENTION, MAX_ITEMS, MAX_PINNED, BLOCKLIST, SECRETS, PROTECTION,
 ];
 
 pub const DAYS_UNIT: &str = "dias";
@@ -115,3 +117,104 @@ pub fn reduce_items_line(before: u32, after: u32) -> String {
          do histórico."
     )
 }
+
+pub const EXPLORER_RESTART_FAILED: &str = "Não foi possível reiniciar o Windows Explorer. \
+     Reinicie pelo Gerenciador de Tarefas ou reinicie o computador.";
+pub const EXPLORER_NOT_RETURNED: &str = "O Windows Explorer não voltou. Abra o Gerenciador de \
+     Tarefas (Ctrl+Shift+Esc), Executar nova tarefa, e digite explorer.";
+
+/// Recusa da combinação pressionada no campo "Alterar".
+pub fn hotkey_rejection(candidate: &HotkeyCombo, rejection: HotkeyRejection) -> String {
+    let reason = match rejection {
+        HotkeyRejection::WinReserved => return WIN_RESERVED.to_string(),
+        HotkeyRejection::NoModifier => "nenhum modificador (Ctrl/Alt/Shift) foi pressionado.",
+        HotkeyRejection::ModifierOnly => "só modificadores foram pressionados, falta uma tecla.",
+        HotkeyRejection::ReservedSystemCombo => "essa combinação é reservada pelo sistema.",
+    };
+    format!(
+        "\"{}\": {reason} Pressione outra combinação.",
+        format_hotkey(candidate)
+    )
+}
+
+/// O `<reinício>` da especificação, como literal para o `concat!`.
+macro_rules! restart {
+    () => {
+        "reiniciar o Windows Explorer, o computador ou sair e entrar na conta"
+    };
+}
+
+pub const RESTART_PHRASE: &str = restart!();
+
+pub const WIN_V: OptionText = OptionText {
+    name: "Abrir com Win+V",
+    description: "Substitui o histórico do Windows.",
+    tip: concat!(
+        "Vale ao salvar. O Win+V passa a abrir o duplicata depois de ",
+        restart!(),
+        "."
+    ),
+};
+
+pub const WIN_RESERVED: &str = "O Windows reserva as combinações com Win. Para usar Win+V, \
+                                ligue a opção \"Abrir com Win+V\".";
+pub const WIN_V_HINT: &str = "Para usar Win+V, ligue a opção \"Abrir com Win+V\"";
+pub const WIN_V_OFF_AWAITING_RETURN: &str = concat!(
+    "O Win+V volta ao histórico do Windows depois de ",
+    restart!(),
+    ". Até lá, o Win+V não faz nada."
+);
+pub const WIN_V_ENABLE_PANEL_LINE: &str =
+    "O painel de histórico do Windows deixa de abrir pelo Win+V.";
+pub const WIN_V_DISABLE_LINE: &str = concat!(
+    "O Win+V para de abrir o duplicata agora e volta ao histórico do Windows depois de ",
+    restart!(),
+    ". Até lá, o Win+V não faz nada."
+);
+pub const WIN_V_DISABLE_NOW_LINE: &str = "O Win+V para de abrir o duplicata agora.";
+pub const WIN_V_WAS_DISABLED_BEFORE: &str =
+    "O Win+V já estava desativado no Windows antes do duplicata e continua assim.";
+pub const WIN_V_REGISTRY_FAILED: &str = "Não foi possível alterar o atalho do Windows; nada mudou.";
+pub const BUTTON_RESTART_EXPLORER: &str = "Reiniciar o Windows Explorer agora";
+pub const RESTART_EXPLORER_CONFIRM: &str = "O Windows Explorer será reiniciado. As janelas de \
+                                            pasta abertas serão fechadas e cópias de arquivo em \
+                                            andamento nelas serão canceladas.";
+pub const BUTTON_RESTART: &str = "Reiniciar";
+pub const WIN_V_FAILURE_TITLE: &str = "Win+V não liberado — duplicata";
+pub const WIN_V_RETURNS_AFTER: &str = concat!(
+    "O Win+V volta ao histórico do Windows depois de ",
+    restart!(),
+    "."
+);
+pub const BUTTON_TURN_OFF: &str = "Desligar a opção";
+pub const BUTTON_KEEP: &str = "Manter";
+pub const BUTTON_OK: &str = "OK";
+
+pub fn win_v_awaiting(reserve: &str) -> String {
+    format!("O Win+V passa a valer depois de {RESTART_PHRASE}. Até lá: {reserve}.")
+}
+
+pub fn win_v_active(reserve: &str) -> String {
+    format!("Em uso: Win+V (reserva: {reserve})")
+}
+
+pub fn win_v_not_released(reserve: &str) -> String {
+    format!("O Windows não liberou o Win+V. Em uso: {reserve}.")
+}
+
+pub fn win_v_enable_when(reserve: &str) -> String {
+    format!(
+        "O Win+V passa a abrir o duplicata depois de {RESTART_PHRASE}. Até lá, continua \
+         valendo {reserve}."
+    )
+}
+
+pub fn win_v_failure(reserve: &str) -> String {
+    format!("O Windows não liberou o Win+V. O duplicata continua abrindo com {reserve}.")
+}
+
+pub const WIN_V_UNINSTALL_FAILED: &str = "Não foi possível devolver o Win+V ao Windows: ele \
+                                          continua desativado no valor DisabledHotkeys do \
+                                          Windows Explorer. Para removê-lo à mão, veja a seção \
+                                          \"Abrir com Win+V\" do README do duplicata \
+                                          (github.com/RoaniPires/duplicata).";

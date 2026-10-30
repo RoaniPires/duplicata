@@ -16,6 +16,11 @@ fn each_option_has_the_name_description_and_tip_of_the_specification() {
             "Clique em Alterar e pressione a nova combinação. Esc cancela a captura.",
         ),
         (
+            "Abrir com Win+V",
+            "Substitui o histórico do Windows.",
+            "Vale ao salvar. O Win+V passa a abrir o duplicata depois de reiniciar o Windows Explorer, o computador ou sair e entrar na conta.",
+        ),
+        (
             "Iniciar com o Windows",
             "Abre o duplicata quando você entra no Windows.",
             "Se o Gerenciador de Tarefas desativou a inicialização, ligar aqui remove esse bloqueio ao salvar.",
@@ -53,6 +58,7 @@ fn each_option_has_the_name_description_and_tip_of_the_specification() {
     ];
     let named = [
         text::HOTKEY,
+        text::WIN_V,
         text::STARTUP,
         text::RETENTION,
         text::MAX_ITEMS,
@@ -172,11 +178,189 @@ fn no_text_cites_documents_requirement_codes_or_technical_names() {
     all.push(text::hotkey_taken("Ctrl+Alt+H", "Ctrl+Shift+V"));
     all.push(text::reduce_retention_line(7, 3));
     all.push(text::reduce_items_line(500, 100));
+    all.extend(
+        [
+            text::WIN_RESERVED,
+            text::WIN_V_HINT,
+            text::WIN_V_OFF_AWAITING_RETURN,
+            text::WIN_V_ENABLE_PANEL_LINE,
+            text::WIN_V_DISABLE_LINE,
+            text::WIN_V_DISABLE_NOW_LINE,
+            text::WIN_V_WAS_DISABLED_BEFORE,
+            text::WIN_V_REGISTRY_FAILED,
+            text::BUTTON_RESTART_EXPLORER,
+            text::RESTART_EXPLORER_CONFIRM,
+            text::BUTTON_RESTART,
+            text::WIN_V_FAILURE_TITLE,
+            text::WIN_V_RETURNS_AFTER,
+            text::BUTTON_TURN_OFF,
+            text::BUTTON_KEEP,
+            text::BUTTON_OK,
+            text::EXPLORER_RESTART_FAILED,
+            text::EXPLORER_NOT_RETURNED,
+        ]
+        .map(str::to_string),
+    );
+    for f in [
+        text::win_v_awaiting,
+        text::win_v_active,
+        text::win_v_not_released,
+        text::win_v_enable_when,
+        text::win_v_failure,
+    ] {
+        all.push(f("Ctrl+Shift+V"));
+    }
 
     assert!(all.iter().all(|t| !t.is_empty()), "nenhum texto vazio");
     for t in &all {
         for banned in ["FR-", "Fatia", "DPAPI", ".md", "especifica"] {
             assert!(!t.contains(banned), "{t:?} contém {banned:?}");
         }
+    }
+}
+
+mod hotkey_rejection {
+    use duplicata_core::{HotkeyCombo, HotkeyRejection};
+
+    use super::text;
+
+    #[test]
+    fn a_combination_with_win_points_to_the_option() {
+        let combo = HotkeyCombo::parse("win+f8").unwrap();
+        assert_eq!(
+            text::hotkey_rejection(&combo, HotkeyRejection::WinReserved),
+            "O Windows reserva as combinações com Win. Para usar Win+V, ligue a opção \
+             \"Abrir com Win+V\"."
+        );
+    }
+
+    #[test]
+    fn the_other_refusals_name_the_combination_and_ask_for_another() {
+        let cases = [
+            (
+                "ctrl+alt+delete",
+                HotkeyRejection::ReservedSystemCombo,
+                "\"Ctrl+Alt+Delete\": essa combinação é reservada pelo sistema. Pressione outra \
+                 combinação.",
+            ),
+            (
+                "p",
+                HotkeyRejection::NoModifier,
+                "\"P\": nenhum modificador (Ctrl/Alt/Shift) foi pressionado. Pressione outra \
+                 combinação.",
+            ),
+            (
+                "ctrl",
+                HotkeyRejection::ModifierOnly,
+                "\"Ctrl\": só modificadores foram pressionados, falta uma tecla. Pressione outra \
+                 combinação.",
+            ),
+        ];
+        for (combo, rejection, want) in cases {
+            let combo = HotkeyCombo::parse(combo).unwrap();
+            assert_eq!(text::hotkey_rejection(&combo, rejection), want);
+        }
+    }
+}
+
+mod win_v {
+    use super::text;
+
+    const RESTART: &str = "reiniciar o Windows Explorer, o computador ou sair e entrar na conta";
+
+    #[test]
+    fn the_status_lines_follow_the_specification() {
+        assert_eq!(text::RESTART_PHRASE, RESTART);
+        assert_eq!(
+            text::win_v_awaiting("Ctrl+Shift+V"),
+            format!("O Win+V passa a valer depois de {RESTART}. Até lá: Ctrl+Shift+V.")
+        );
+        assert_eq!(
+            text::win_v_active("Ctrl+Alt+V"),
+            "Em uso: Win+V (reserva: Ctrl+Alt+V)"
+        );
+        assert_eq!(
+            text::win_v_not_released("Ctrl+Shift+V"),
+            "O Windows não liberou o Win+V. Em uso: Ctrl+Shift+V."
+        );
+        assert_eq!(
+            text::WIN_V_OFF_AWAITING_RETURN,
+            format!(
+                "O Win+V volta ao histórico do Windows depois de {RESTART}. Até lá, o Win+V não faz nada."
+            )
+        );
+    }
+
+    #[test]
+    fn the_hint_and_the_refusal_point_to_the_option() {
+        assert_eq!(
+            text::WIN_V_HINT,
+            "Para usar Win+V, ligue a opção \"Abrir com Win+V\""
+        );
+        assert_eq!(
+            text::WIN_RESERVED,
+            "O Windows reserva as combinações com Win. Para usar Win+V, ligue a opção \"Abrir com Win+V\"."
+        );
+    }
+
+    #[test]
+    fn the_confirmations_follow_the_specification() {
+        assert_eq!(
+            text::WIN_V_ENABLE_PANEL_LINE,
+            "O painel de histórico do Windows deixa de abrir pelo Win+V."
+        );
+        assert_eq!(
+            text::win_v_enable_when("Ctrl+Shift+V"),
+            format!(
+                "O Win+V passa a abrir o duplicata depois de {RESTART}. Até lá, continua valendo Ctrl+Shift+V."
+            )
+        );
+        assert_eq!(
+            text::WIN_V_DISABLE_LINE,
+            format!(
+                "O Win+V para de abrir o duplicata agora e volta ao histórico do Windows depois de {RESTART}. Até lá, o Win+V não faz nada."
+            )
+        );
+        assert_eq!(
+            text::WIN_V_DISABLE_NOW_LINE,
+            "O Win+V para de abrir o duplicata agora."
+        );
+        assert_eq!(
+            text::WIN_V_WAS_DISABLED_BEFORE,
+            "O Win+V já estava desativado no Windows antes do duplicata e continua assim."
+        );
+        assert_eq!(
+            text::WIN_V_REGISTRY_FAILED,
+            "Não foi possível alterar o atalho do Windows; nada mudou."
+        );
+    }
+
+    #[test]
+    fn the_restart_button_and_its_confirmation_follow_the_specification() {
+        assert_eq!(
+            text::BUTTON_RESTART_EXPLORER,
+            "Reiniciar o Windows Explorer agora"
+        );
+        assert_eq!(
+            text::RESTART_EXPLORER_CONFIRM,
+            "O Windows Explorer será reiniciado. As janelas de pasta abertas serão fechadas e cópias de arquivo em andamento nelas serão canceladas."
+        );
+        assert_eq!(text::BUTTON_RESTART, "Reiniciar");
+    }
+
+    #[test]
+    fn the_failure_window_follows_the_specification() {
+        assert_eq!(
+            text::win_v_failure("Ctrl+Shift+V"),
+            "O Windows não liberou o Win+V. O duplicata continua abrindo com Ctrl+Shift+V."
+        );
+        assert_eq!(
+            text::WIN_V_RETURNS_AFTER,
+            format!("O Win+V volta ao histórico do Windows depois de {RESTART}.")
+        );
+        assert_eq!(text::BUTTON_TURN_OFF, "Desligar a opção");
+        assert_eq!(text::BUTTON_KEEP, "Manter");
+        assert_eq!(text::BUTTON_OK, "OK");
+        assert!(!text::WIN_V_FAILURE_TITLE.is_empty());
     }
 }

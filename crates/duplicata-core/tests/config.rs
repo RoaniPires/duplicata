@@ -345,3 +345,58 @@ fn compile_time_constants_have_the_revised_values() {
     assert_eq!(DEFAULT_MAX_BYTES_HDROP, 1024 * 1024);
     assert_eq!(DEFAULT_MAX_BYTES_CUSTOM, 8 * 1024 * 1024);
 }
+
+#[test]
+fn a_config_without_the_win_v_fields_reads_as_off_without_any_fallback() {
+    let toml = "max_items = 10\nhotkey = \"ctrl+shift+v\"\n";
+    let (c, fallbacks) = duplicata_core::Config::from_str_over(cfg(), toml);
+    assert!(fallbacks.is_empty(), "arquivo de versão anterior não avisa");
+    assert!(!c.open_with_win_v);
+    assert!(!c.win_v_added_v);
+    assert_eq!(c.win_v_explorer, None);
+}
+
+#[test]
+fn the_win_v_fields_round_trip_through_the_toml() {
+    let mut c = cfg();
+    c.open_with_win_v = true;
+    c.win_v_added_v = true;
+    c.win_v_explorer = Some(133_456_789_012_345_678);
+    let (reparsed, fallbacks) = duplicata_core::Config::from_str_over(cfg(), &c.to_toml_string());
+    assert!(fallbacks.is_empty());
+    assert!(reparsed.open_with_win_v);
+    assert!(reparsed.win_v_added_v);
+    assert_eq!(reparsed.win_v_explorer, Some(133_456_789_012_345_678));
+}
+
+#[test]
+fn an_unknown_explorer_marker_is_not_written() {
+    let c = cfg();
+    let serialized = c.to_toml_string();
+    assert!(serialized.contains("open_with_win_v = false"));
+    assert!(serialized.contains("win_v_added_v = false"));
+    assert!(
+        !serialized.contains("win_v_explorer"),
+        "o marcador só é gravado quando existe"
+    );
+}
+
+#[test]
+fn invalid_win_v_values_fall_back_only_for_that_field() {
+    let toml = "\
+        open_with_win_v = talvez\n\
+        win_v_added_v = sim\n\
+        win_v_explorer = -3\n\
+        max_items = 9\n\
+    ";
+    let (c, fallbacks) = duplicata_core::Config::from_str_over(cfg(), toml);
+    assert!(!c.open_with_win_v);
+    assert!(!c.win_v_added_v);
+    assert_eq!(c.win_v_explorer, None);
+    assert_eq!(c.max_items, 9);
+    let fields: Vec<&str> = fallbacks.iter().map(|f| f.field).collect();
+    assert_eq!(
+        fields,
+        vec!["open_with_win_v", "win_v_added_v", "win_v_explorer"]
+    );
+}

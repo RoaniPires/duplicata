@@ -615,3 +615,25 @@ fn the_root_element_itself_is_not_searched() {
     let xml = format!(r#"<Package xmlns="{}" Scope="perUser"/>"#, check::WIX_V4_NS);
     assert_eq!(violations(&xml), every_rule_missing());
 }
+
+/// A desinstalação de dados (que também tira o `V` do Win+V) roda só na
+/// remoção total, nunca na atualização por cima.
+#[test]
+fn uninstall_data_runs_only_on_full_removal_never_on_upgrade() {
+    let doc = roxmltree::Document::parse(VERSIONED).expect("XML válido");
+    let condition = doc
+        .descendants()
+        .find(|n| {
+            n.has_tag_name("Custom") && n.attribute("Action") == Some("UninstallDataOnUninstall")
+        })
+        .and_then(|n| n.attribute("Condition"))
+        .expect("a ação UninstallDataOnUninstall é sequenciada com condição");
+    assert!(
+        condition.contains("REMOVE=\"ALL\""),
+        "só na remoção: {condition:?}"
+    );
+    assert!(
+        condition.contains("NOT UPGRADINGPRODUCTCODE"),
+        "nunca na atualização: {condition:?}"
+    );
+}

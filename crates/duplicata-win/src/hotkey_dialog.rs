@@ -2,9 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use duplicata_core::{
-    format_hotkey, log_event, validate_hotkey, Config, HotkeyCombo, HotkeyRejection, LogFields,
-};
+use duplicata_core::{format_hotkey, log_event, validate_hotkey, Config, HotkeyCombo, LogFields};
 use tracing::Level;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -18,8 +16,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, LoadCursorW,
-    RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, IsWindow,
+    LoadCursorW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW,
     CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, SW_SHOW, WM_CLOSE, WM_CREATE, WM_KEYDOWN, WM_NCCREATE,
     WM_NCDESTROY, WM_PAINT, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
 };
@@ -41,6 +39,35 @@ struct HotkeyDialogCtx {
     message: RefCell<String>,
 }
 
+thread_local! {
+    static OPEN_HWND: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+fn open_window() -> Option<HWND> {
+    let bits = OPEN_HWND.with(Cell::get)?;
+    let hwnd = HWND(bits as *mut std::ffi::c_void);
+    // SAFETY: `IsWindow` só consulta, mesmo com um handle já destruído.
+    unsafe { IsWindow(Some(hwnd)) }.as_bool().then_some(hwnd)
+}
+
+/// A janela de conflito aberta, se houver.
+pub fn conflict_window() -> Option<HWND> {
+    open_window()
+}
+
+/// Fecha a janela de conflito sem escolher combinação: o Win+V passou a
+/// valer e a reserva não pode ser registrada.
+pub fn close_conflict() {
+    if let Some(hwnd) = open_window() {
+        // SAFETY: `hwnd` é a janela viva; o contexto sai no `WM_NCDESTROY`.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}
+
+/// Abre a janela de conflito; aberta, só a traz para a frente (nunca duas,
+/// nem uma segunda captura armada).
 pub fn open_after_conflict(
     history_hwnd: HWND,
     rejected: HotkeyCombo,
@@ -48,6 +75,13 @@ pub fn open_after_conflict(
     config_path: PathBuf,
     registered_hotkey: Rc<Cell<Option<HotkeyCombo>>>,
 ) {
+    if let Some(hwnd) = open_window() {
+        // SAFETY: `hwnd` é a janela viva.
+        unsafe {
+            let _ = SetForegroundWindow(hwnd);
+        }
+        return;
+    }
     let message = format!(
         "\"{}\" já está em uso por outro programa.\n\nPressione a nova combinação de teclas.",
         format_hotkey(&rejected)
@@ -99,6 +133,7 @@ pub fn open_after_conflict(
             return;
         };
 
+        OPEN_HWND.with(|c| c.set(Some(hwnd.0 as isize)));
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
     }
@@ -156,10 +191,8 @@ pub fn probe_hotkey(
     candidate: HotkeyCombo,
 ) -> Result<(), String> {
     if let Err(rejection) = validate_hotkey(&candidate) {
-        return Err(format!(
-            "\"{}\": {} Pressione outra combinação.",
-            format_hotkey(&candidate),
-            rejection_reason(rejection)
+        return Err(duplicata_core::settings_text::hotkey_rejection(
+            &candidate, rejection,
         ));
     }
 
@@ -220,6 +253,16 @@ pub fn persist_hotkey_only(
     paths: &Config,
     hotkey: HotkeyCombo,
 ) -> std::io::Result<()> {
+    persist_only(config_path, paths, |saved| saved.hotkey = hotkey)
+}
+
+/// Grava só os campos que `edit` muda sobre o que está no arquivo (ou sobre
+/// os padrões, sem arquivo).
+pub fn persist_only(
+    config_path: &Path,
+    paths: &Config,
+    edit: impl FnOnce(&mut Config),
+) -> std::io::Result<()> {
     let defaults = Config::with_paths(paths.db_path.clone(), paths.log_dir.clone());
     let mut saved = match std::fs::read_to_string(config_path) {
         Ok(text) => Config::from_str_over(defaults, &text).0,
@@ -227,7 +270,7 @@ pub fn persist_hotkey_only(
         // Sem conseguir ler o salvo, não sobrescreve: o arquivo fica como está.
         Err(e) => return Err(e),
     };
-    saved.hotkey = hotkey;
+    edit(&mut saved);
     saved.persist(config_path)
 }
 
@@ -289,14 +332,6 @@ fn try_combo(hwnd: HWND, ctx: &HotkeyDialogCtx, combo: HotkeyCombo) {
 
 fn already_current(registered: Option<HotkeyCombo>, candidate: HotkeyCombo) -> bool {
     registered == Some(candidate)
-}
-
-fn rejection_reason(rejection: HotkeyRejection) -> &'static str {
-    match rejection {
-        HotkeyRejection::NoModifier => "nenhum modificador (Ctrl/Alt/Shift) foi pressionado.",
-        HotkeyRejection::ModifierOnly => "só modificadores foram pressionados, falta uma tecla.",
-        HotkeyRejection::ReservedSystemCombo => "essa combinação é reservada pelo sistema.",
-    }
 }
 
 fn show_message(hwnd: HWND, ctx: &HotkeyDialogCtx, message: String) {
@@ -419,6 +454,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_NCDESTROY => {
+            OPEN_HWND.with(|c| {
+                if c.get() == Some(hwnd.0 as isize) {
+                    c.set(None);
+                }
+            });
             hotkey_capture::release(CaptureOwner::StandaloneDialog);
             // SAFETY: reconstrói e dropa o `Box` alocado em `open()` — nenhum
             // código lê `GWLP_USERDATA` de novo depois desta mensagem (é a

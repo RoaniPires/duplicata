@@ -532,7 +532,8 @@ mod salvar {
         assert_eq!(
             s.finish_save(SaveReport {
                 hotkey_failed: false,
-                persist_failed: true
+                persist_failed: true,
+                ..Default::default()
             }),
             SaveOutcome::StayOpen {
                 error_line: Some(text::SAVE_FAILED)
@@ -557,7 +558,8 @@ mod salvar {
         assert_eq!(
             s.finish_save(SaveReport {
                 hotkey_failed: true,
-                persist_failed: false
+                persist_failed: false,
+                ..Default::default()
             }),
             SaveOutcome::StayOpen { error_line: None }
         );
@@ -743,5 +745,294 @@ mod ordem_e_bloqueio {
             startup_for_settings(true, Approval::Desaprovado),
             StartupState::DesligadoPeloGerenciador
         );
+    }
+}
+
+mod win_v {
+    use duplicata_core::win_v::{WinVConfig, WinVStatus};
+
+    use super::*;
+
+    const ON_OURS: WinVConfig = WinVConfig {
+        on: true,
+        v_ours: true,
+        marker: Some(1),
+    };
+    const ON_NOT_OURS: WinVConfig = WinVConfig {
+        on: true,
+        v_ours: false,
+        marker: Some(1),
+    };
+
+    fn opened_with(config: WinVConfig, status: WinVStatus) -> SettingsSession {
+        let mut c = cfg();
+        config.write_into(&mut c);
+        let mut s = SettingsSession::open(&c, StartupState::Desligado);
+        s.sync_win_v(config, status);
+        s
+    }
+
+    fn lines(step: SaveStep) -> Vec<String> {
+        match step {
+            SaveStep::Confirm(lines) => lines,
+            SaveStep::Proceed(_) => panic!("o Win+V sempre pede confirmação"),
+        }
+    }
+
+    #[test]
+    fn the_option_is_read_from_the_config() {
+        let mut c = cfg();
+        ON_OURS.write_into(&mut c);
+        let s = SettingsSession::open(&c, StartupState::Desligado);
+        assert!(s.saved().win_v && s.in_effect().win_v && s.draft().win_v);
+        assert!(!session().draft().win_v);
+    }
+
+    #[test]
+    fn turning_it_on_does_not_enable_apply_and_apply_ignores_it() {
+        let mut s = session();
+        s.set_win_v(true);
+        assert_eq!(
+            kinds(&s),
+            vec![(Setting::WinV, ChangeKind::SaveOnlyConfirmed)]
+        );
+        assert!(!s.can_apply());
+        assert!(s.apply().is_empty());
+        assert!(s.draft().win_v, "continua no rascunho");
+        assert!(!s.in_effect().win_v);
+    }
+
+    #[test]
+    fn cancel_drops_the_draft_without_touching_the_registry() {
+        let mut s = session();
+        s.set_win_v(true);
+        assert!(s.cancel().is_empty());
+        assert!(!s.draft().win_v);
+    }
+
+    #[test]
+    fn saving_it_on_asks_with_the_two_lines_then_enables_before_persisting() {
+        let mut s = session();
+        s.set_win_v(true);
+        assert_eq!(
+            lines(s.begin_save()),
+            vec![
+                text::WIN_V_ENABLE_PANEL_LINE.to_string(),
+                text::win_v_enable_when("Ctrl+Shift+V"),
+            ]
+        );
+        assert_eq!(s.confirm_save(), vec![Effect::EnableWinV, Effect::Persist]);
+    }
+
+    #[test]
+    fn irreversible_lines_come_first_then_cannot_undo_then_the_win_v_block() {
+        let mut s = session();
+        s.set_numeric_text(NumericField::RetentionDays, "3");
+        s.set_win_v(true);
+        assert_eq!(
+            lines(s.begin_save()),
+            vec![
+                text::reduce_retention_line(7, 3),
+                text::CANNOT_UNDO.to_string(),
+                String::new(),
+                text::WIN_V_ENABLE_PANEL_LINE.to_string(),
+                text::win_v_enable_when("Ctrl+Shift+V"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_enable_line_names_the_reserve_being_saved() {
+        let mut s = session();
+        s.set_pending_hotkey(CTRL_ALT_H);
+        s.set_win_v(true);
+        assert!(lines(s.begin_save()).contains(&text::win_v_enable_when("Ctrl+Alt+H")));
+    }
+
+    #[test]
+    fn saving_it_off_with_our_v_says_it_returns_after_a_restart() {
+        let mut s = opened_with(ON_OURS, WinVStatus::Active);
+        s.set_win_v(false);
+        assert_eq!(
+            lines(s.begin_save()),
+            vec![text::WIN_V_DISABLE_LINE.to_string()]
+        );
+        assert_eq!(s.confirm_save(), vec![Effect::DisableWinV, Effect::Persist]);
+    }
+
+    #[test]
+    fn saving_it_off_with_a_v_that_was_not_ours_says_it_stays_disabled() {
+        let mut s = opened_with(ON_NOT_OURS, WinVStatus::Active);
+        s.set_win_v(false);
+        assert_eq!(
+            lines(s.begin_save()),
+            vec![
+                text::WIN_V_DISABLE_NOW_LINE.to_string(),
+                text::WIN_V_WAS_DISABLED_BEFORE.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn back_in_the_confirmation_keeps_the_option_in_the_draft() {
+        let mut s = session();
+        s.set_win_v(true);
+        let _ = s.begin_save();
+        s.back();
+        assert!(s.draft().win_v);
+        assert!(!s.in_effect().win_v);
+    }
+
+    #[test]
+    fn a_registry_failure_stays_open_reverts_the_option_and_keeps_the_rest() {
+        let mut s = session();
+        s.set_numeric_text(NumericField::RetentionDays, "14");
+        s.set_win_v(true);
+        let _ = s.begin_save();
+        let _ = s.confirm_save();
+        assert_eq!(
+            s.finish_save(SaveReport {
+                win_v_failed: true,
+                ..Default::default()
+            }),
+            SaveOutcome::StayOpen {
+                error_line: Some(text::WIN_V_REGISTRY_FAILED)
+            }
+        );
+        assert!(!s.draft().win_v, "a opção volta a desligada");
+        assert!(!s.in_effect().win_v);
+        assert_eq!(s.saved().retention_days, 14, "o resto do Salvar vale");
+        assert!(s.cancel().is_empty());
+    }
+
+    #[test]
+    fn a_registry_and_config_failure_show_only_the_save_failure() {
+        let mut s = opened_with(ON_OURS, WinVStatus::Active);
+        s.set_win_v(false);
+        let _ = s.begin_save();
+        let _ = s.confirm_save();
+        assert_eq!(
+            s.finish_save(SaveReport {
+                win_v_failed: true,
+                persist_failed: true,
+                ..Default::default()
+            }),
+            SaveOutcome::StayOpen {
+                error_line: Some(text::SAVE_FAILED)
+            }
+        );
+        assert!(s.draft().win_v, "a opção volta a ligada");
+    }
+
+    #[test]
+    fn with_win_v_active_the_reserve_changes_without_registering() {
+        let mut s = opened_with(ON_OURS, WinVStatus::Active);
+        s.set_pending_hotkey(CTRL_ALT_H);
+        assert_eq!(s.apply(), vec![Effect::SetReserve(CTRL_ALT_H)]);
+        assert_eq!(s.cancel(), vec![Effect::SetReserve(HotkeyCombo::DEFAULT)]);
+    }
+
+    #[test]
+    fn turning_it_off_sets_the_new_reserve_before_disabling() {
+        let mut s = opened_with(ON_OURS, WinVStatus::Active);
+        s.set_pending_hotkey(CTRL_ALT_H);
+        s.set_win_v(false);
+        let _ = s.begin_save();
+        assert_eq!(
+            s.confirm_save(),
+            vec![
+                Effect::SetReserve(CTRL_ALT_H),
+                Effect::DisableWinV,
+                Effect::Persist
+            ]
+        );
+    }
+
+    #[test]
+    fn each_status_has_its_line_and_only_the_awaiting_ones_show_the_button() {
+        let reserve = "Ctrl+Shift+V";
+        let cases = [
+            (WinVStatus::Off, None, false),
+            (
+                WinVStatus::AwaitingRestart,
+                Some(text::win_v_awaiting(reserve)),
+                true,
+            ),
+            (WinVStatus::Active, Some(text::win_v_active(reserve)), false),
+            (
+                WinVStatus::NotReleased,
+                Some(text::win_v_not_released(reserve)),
+                false,
+            ),
+            (
+                WinVStatus::OffAwaitingReturn,
+                Some(text::WIN_V_OFF_AWAITING_RETURN.to_string()),
+                true,
+            ),
+        ];
+        for (status, line, button) in cases {
+            let s = opened_with(ON_OURS, status);
+            let view = s.hotkey_line(Some(HotkeyCombo::DEFAULT), false, false);
+            assert_eq!(view.status_line, line, "{status:?}");
+            assert_eq!(view.restart_visible, button, "{status:?}");
+            assert_eq!(view.restart_enabled, button, "{status:?}");
+            assert_eq!(view.combo, reserve, "ao lado de Alterar continua a reserva");
+        }
+    }
+
+    #[test]
+    fn with_win_v_active_an_unregistered_reserve_is_not_reported_as_missing() {
+        let s = opened_with(ON_OURS, WinVStatus::Active);
+        let view = s.hotkey_line(None, false, false);
+        assert_eq!(view.description, text::HOTKEY.description);
+    }
+
+    #[test]
+    fn the_hint_shows_only_while_the_field_waits_for_the_combination() {
+        let mut s = session();
+        s.hotkey_armed();
+        let armed = s.hotkey_line(Some(HotkeyCombo::DEFAULT), true, false);
+        assert_eq!(armed.hint, Some(text::WIN_V_HINT));
+        s.hotkey_disarmed();
+        let idle = s.hotkey_line(Some(HotkeyCombo::DEFAULT), false, false);
+        assert_eq!(idle.hint, None);
+    }
+
+    #[test]
+    fn the_restart_button_asks_for_confirmation_and_is_disabled_while_running() {
+        let mut s = opened_with(ON_OURS, WinVStatus::AwaitingRestart);
+        assert_eq!(
+            s.begin_explorer_restart(),
+            Some(vec![text::RESTART_EXPLORER_CONFIRM.to_string()])
+        );
+        s.explorer_restart_started();
+        assert_eq!(s.begin_explorer_restart(), None);
+        let view = s.hotkey_line(Some(HotkeyCombo::DEFAULT), false, false);
+        assert!(view.restart_visible && !view.restart_enabled);
+        s.explorer_restart_finished();
+        assert!(s.begin_explorer_restart().is_some());
+        assert_eq!(session().begin_explorer_restart(), None, "desligada");
+    }
+
+    #[test]
+    fn the_restart_no_longer_applies_once_the_explorer_came_back_by_another_way() {
+        let mut s = opened_with(ON_OURS, WinVStatus::AwaitingRestart);
+        assert!(s.begin_explorer_restart().is_some());
+        // O Explorer voltou com a confirmação aberta: "Reiniciar" não vale mais.
+        s.sync_win_v(ON_OURS, WinVStatus::Active);
+        assert_eq!(s.begin_explorer_restart(), None);
+    }
+
+    #[test]
+    fn an_outside_change_follows_the_option_unless_the_draft_has_its_own() {
+        let mut s = opened_with(ON_OURS, WinVStatus::NotReleased);
+        s.sync_win_v(WinVConfig::default(), WinVStatus::OffAwaitingReturn);
+        assert!(!s.saved().win_v && !s.in_effect().win_v && !s.draft().win_v);
+        assert!(s.classify().is_empty());
+
+        let mut s = session();
+        s.set_win_v(true);
+        s.sync_win_v(WinVConfig::default(), WinVStatus::Off);
+        assert!(s.draft().win_v, "o rascunho do usuário continua");
     }
 }

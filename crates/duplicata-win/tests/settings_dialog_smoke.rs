@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use duplicata_core::settings_text as text;
+use duplicata_core::testsupport::{FakeDisabledHotkeys, FixedExplorer};
 use duplicata_core::{
     ByteBudgetQueue, CaptureQueue, Config, FakeHistoryRepository, HistoryReader, HotkeyCombo,
     SelfWriteFilter, StoreError, WorkItem,
@@ -16,9 +17,10 @@ use duplicata_win::hotkey_capture::{self, CaptureOwner};
 use duplicata_win::settings_dialog::{
     self as dialog, ID_ADD, ID_ALTER, ID_APPLY, ID_CANCEL, ID_CONTENT, ID_LIST, ID_LIST_EDIT,
     ID_MAX_ITEMS, ID_MAX_PINNED, ID_PROTECTION, ID_REMOVE, ID_RETENTION, ID_SAVE, ID_SECRETS,
-    ID_STARTUP,
+    ID_STARTUP, ID_WIN_V,
 };
 use duplicata_win::system_appearance::SystemAppearance;
+use duplicata_win::win_v_runtime::WinVRuntime;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::Controls::WM_MOUSEHOVER;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -47,6 +49,35 @@ fn cfg_at(dir: &Path) -> Config {
     c
 }
 
+/// O estado do Win+V com o registro em memória e um Explorer que não muda.
+fn runtime(
+    cfg: &Rc<RefCell<Config>>,
+    path: PathBuf,
+    history: HWND,
+    registered: Option<HotkeyCombo>,
+    store: Rc<RefCell<FakeDisabledHotkeys>>,
+) -> Rc<WinVRuntime> {
+    WinVRuntime::new(
+        history,
+        Rc::clone(cfg),
+        path,
+        Rc::new(Cell::new(registered)),
+        Box::new(store),
+        Box::new(FixedExplorer(Some(1))),
+    )
+}
+
+fn open_dialog(
+    cfg: &Rc<RefCell<Config>>,
+    path: PathBuf,
+    queue: Arc<dyn CaptureQueue<WorkItem>>,
+    history: HWND,
+    registered: Option<HotkeyCombo>,
+) {
+    let store = Rc::new(RefCell::new(FakeDisabledHotkeys::with(Some("QR"))));
+    dialog::open(queue, runtime(cfg, path, history, registered, store));
+}
+
 fn open_with(
     history: HWND,
     registered: Option<HotkeyCombo>,
@@ -58,12 +89,12 @@ fn open_with(
     edit(&mut c);
     let cfg = Rc::new(RefCell::new(c));
     let queue = Arc::new(ByteBudgetQueue::<WorkItem>::new());
-    dialog::open(
-        Rc::clone(&cfg),
+    open_dialog(
+        &cfg,
         path.clone(),
         Arc::clone(&queue) as Arc<dyn CaptureQueue<WorkItem>>,
         history,
-        Rc::new(Cell::new(registered)),
+        registered,
     );
     assert!(
         dialog::window().is_some(),
@@ -467,12 +498,12 @@ fn a_failed_write_keeps_the_window_open_with_the_message_and_the_change_in_effec
     drop(o);
     close_if_open();
     let cfg = Rc::new(RefCell::new(cfg_at(dir.path())));
-    dialog::open(
-        Rc::clone(&cfg),
+    open_dialog(
+        &cfg,
         blocked,
         Arc::new(ByteBudgetQueue::new()) as Arc<dyn CaptureQueue<WorkItem>>,
         HWND::default(),
-        Rc::new(Cell::new(Some(HotkeyCombo::DEFAULT))),
+        Some(HotkeyCombo::DEFAULT),
     );
     set_text(ID_RETENTION, "10");
     click(ID_SAVE);
@@ -522,12 +553,12 @@ fn opening_again_brings_the_same_window_with_the_pending_changes() {
     let o = open();
     let first = dialog::window().unwrap();
     set_text(ID_MAX_ITEMS, "1000");
-    dialog::open(
-        Rc::clone(&o.cfg),
+    open_dialog(
+        &o.cfg,
         o.path.clone(),
         Arc::clone(&o.queue) as Arc<dyn CaptureQueue<WorkItem>>,
         HWND::default(),
-        Rc::new(Cell::new(Some(HotkeyCombo::DEFAULT))),
+        Some(HotkeyCombo::DEFAULT),
     );
     assert_eq!(dialog::window(), Some(first));
     assert_eq!(text_of(ID_MAX_ITEMS), "1000");
@@ -595,15 +626,15 @@ fn hovering_a_row_shows_its_tip_and_moving_to_another_row_hides_it() {
     };
     // SAFETY: área de conteúdo viva; mensagens síncronas com pontos dela.
     unsafe {
-        SendMessageW(content, WM_MOUSEMOVE, None, Some(at(4)));
-        SendMessageW(content, WM_MOUSEHOVER, None, Some(at(4)));
+        SendMessageW(content, WM_MOUSEMOVE, None, Some(at(5)));
+        SendMessageW(content, WM_MOUSEHOVER, None, Some(at(5)));
     }
     assert_eq!(
         dialog::tooltip_text().as_deref(),
         Some(text::MAX_PINNED.tip)
     );
     // SAFETY: idem.
-    unsafe { SendMessageW(content, WM_MOUSEMOVE, None, Some(at(3))) };
+    unsafe { SendMessageW(content, WM_MOUSEMOVE, None, Some(at(4))) };
     assert_eq!(dialog::tooltip_text(), None);
     close_if_open();
 }
@@ -639,7 +670,7 @@ fn tab_follows_the_visual_order_skips_the_disabled_apply_and_scrolls_into_view()
         let _ = SetFocus(Some(control(ID_ALTER)));
     }
     let mut order = Vec::new();
-    for _ in 0..13 {
+    for _ in 0..14 {
         // SAFETY: só consulta o foco.
         let focus = unsafe { GetFocus() };
         // SAFETY: só consulta.
@@ -648,7 +679,7 @@ fn tab_follows_the_visual_order_skips_the_disabled_apply_and_scrolls_into_view()
             key(focus, WM_KEYDOWN, VK_TAB.0),
             "Tab passa pelo IsDialogMessage"
         );
-        if order.len() == 11 {
+        if order.len() == 12 {
             assert!(
                 dialog::scroll_position().unwrap() > 0,
                 "o fim do conteúdo rolou"
@@ -659,6 +690,7 @@ fn tab_follows_the_visual_order_skips_the_disabled_apply_and_scrolls_into_view()
         order,
         vec![
             ID_ALTER,
+            ID_WIN_V,
             ID_STARTUP,
             ID_RETENTION,
             ID_MAX_ITEMS,
@@ -847,4 +879,127 @@ fn a_toggle_changes_only_when_the_press_started_on_it() {
     }
     assert!(checked(ID_SECRETS), "Espaço apertado e solto nela muda");
     close_if_open();
+}
+
+mod win_v {
+    use super::*;
+
+    /// Clica no botão principal ("Salvar"/"Reiniciar") da confirmação aberta.
+    fn confirm_primary() {
+        let confirm = dialog::confirm_window().expect("confirmação aberta");
+        // SAFETY: janela viva desta thread; 301 é o botão principal.
+        unsafe {
+            let b = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(confirm), 301)
+                .expect("botão principal");
+            SendMessageW(b, BM_CLICK, None, None);
+        }
+    }
+
+    fn open_with_store(store: Rc<RefCell<FakeDisabledHotkeys>>) -> Rc<RefCell<Config>> {
+        open_with_store_at(store, false)
+    }
+
+    /// `config_is_a_folder`: o `config.toml` não pode ser gravado.
+    fn open_with_store_at(
+        store: Rc<RefCell<FakeDisabledHotkeys>>,
+        config_is_a_folder: bool,
+    ) -> Rc<RefCell<Config>> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = if config_is_a_folder {
+            dir.path().to_path_buf()
+        } else {
+            dir.path().join("config.toml")
+        };
+        let cfg = Rc::new(RefCell::new(cfg_at(dir.path())));
+        let queue: Arc<dyn CaptureQueue<WorkItem>> = Arc::new(ByteBudgetQueue::new());
+        dialog::open(
+            queue,
+            runtime(
+                &cfg,
+                path,
+                HWND::default(),
+                Some(HotkeyCombo::DEFAULT),
+                store,
+            ),
+        );
+        std::mem::forget(dir);
+        cfg
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria uma janela real"]
+    fn a_new_install_shows_the_option_off_without_status_line() {
+        let _o = open();
+        assert!(!checked(ID_WIN_V));
+        assert_eq!(dialog::win_v_status_line(), None);
+        let restart = control(duplicata_win::settings_dialog::ID_RESTART_EXPLORER);
+        // SAFETY: só consulta a visibilidade de um controle vivo.
+        let visible = unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(restart) };
+        assert!(!visible.as_bool(), "sem botão de reiniciar");
+        close_if_open();
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria uma janela real"]
+    fn turning_it_on_and_saving_writes_v_after_the_confirmation() {
+        let store = Rc::new(RefCell::new(FakeDisabledHotkeys::with(Some("QR"))));
+        let cfg = open_with_store(Rc::clone(&store));
+        click(ID_WIN_V);
+        assert!(!enabled(ID_APPLY), "a opção não habilita o Aplicar");
+        click(ID_SAVE);
+        assert_eq!(
+            dialog::confirm_lines(),
+            vec![
+                text::WIN_V_ENABLE_PANEL_LINE.to_string(),
+                text::win_v_enable_when("Ctrl+Shift+V"),
+            ]
+        );
+        confirm_primary();
+        assert_eq!(store.borrow().value.as_deref(), Some("QRV"));
+        assert!(cfg.borrow().open_with_win_v);
+        assert!(cfg.borrow().win_v_added_v);
+        close_if_open();
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria uma janela real"]
+    fn a_registry_failure_keeps_the_window_open_with_the_option_off() {
+        let store = Rc::new(RefCell::new(FakeDisabledHotkeys::with(Some("QR"))));
+        store.borrow_mut().fail_write = true;
+        let cfg = open_with_store(Rc::clone(&store));
+        set_text(ID_RETENTION, "14");
+        click(ID_WIN_V);
+        click(ID_SAVE);
+        confirm_primary();
+        assert!(is_open());
+        assert_eq!(dialog::error_line(), Some(text::WIN_V_REGISTRY_FAILED));
+        assert!(!checked(ID_WIN_V), "a opção volta a desligada");
+        assert_eq!(cfg.borrow().retention, Duration::from_secs(14 * DAY));
+        assert!(!cfg.borrow().open_with_win_v);
+        close_if_open();
+    }
+
+    #[test]
+    #[ignore = "precisa de sessão gráfica; cria uma janela real"]
+    fn without_saving_the_config_our_v_does_not_stay_behind() {
+        let store = Rc::new(RefCell::new(FakeDisabledHotkeys::with(Some("QR"))));
+        let cfg = open_with_store_at(Rc::clone(&store), true);
+        click(ID_WIN_V);
+        click(ID_SAVE);
+        confirm_primary();
+        assert!(is_open());
+        assert_eq!(
+            dialog::error_line(),
+            Some(text::SAVE_FAILED),
+            "só a falha do Salvar"
+        );
+        assert_eq!(
+            store.borrow().value.as_deref(),
+            Some("QR"),
+            "o V foi desfeito"
+        );
+        assert!(!checked(ID_WIN_V), "a opção volta a desligada");
+        assert!(!cfg.borrow().open_with_win_v);
+        close_if_open();
+    }
 }

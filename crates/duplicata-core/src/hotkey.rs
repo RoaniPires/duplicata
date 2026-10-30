@@ -191,6 +191,8 @@ pub enum HotkeyRejection {
     NoModifier,
     ModifierOnly,
     ReservedSystemCombo,
+    /// Qualquer combinação com Win: o Win+V só entra pela opção.
+    WinReserved,
 }
 
 pub fn validate_hotkey(combo: &HotkeyCombo) -> Result<(), HotkeyRejection> {
@@ -201,7 +203,7 @@ pub fn validate_hotkey(combo: &HotkeyCombo) -> Result<(), HotkeyRejection> {
         return Err(HotkeyRejection::ModifierOnly);
     }
     if combo.modifiers & MOD_WIN != 0 {
-        return Err(HotkeyRejection::ReservedSystemCombo);
+        return Err(HotkeyRejection::WinReserved);
     }
     if combo.modifiers == (MOD_CONTROL | MOD_ALT) && combo.vkey == VK_DELETE {
         return Err(HotkeyRejection::ReservedSystemCombo);

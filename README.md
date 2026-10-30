@@ -49,6 +49,42 @@ a proteção do banco. Aplicar põe as mudanças em efeito sem gravar, Cancelar
 volta ao que era e Salvar grava. Reduzir o prazo ou a quantidade, ou religar
 a inicialização desativada pelo Gerenciador de Tarefas, pede confirmação.
 
+## Abrir com Win+V
+
+Para abrir o duplicata com `Win+V` no lugar do histórico do Windows, ligue
+**Abrir com Win+V** nas Configurações e clique em Salvar. O duplicata inclui
+`V` no valor `DisabledHotkeys` do Explorer, sem administrador; os outros
+caracteres que já estavam lá ficam como estavam.
+
+O `Win+V` passa a valer depois de reiniciar o Windows Explorer, o computador
+ou sair e entrar na conta. O primeiro fica a um clique: o botão **Reiniciar o
+Windows Explorer agora**, nas Configurações, pede confirmação e fecha o
+Explorer normalmente (janelas de pasta abertas fecham). Até lá, vale o atalho
+configurado (por padrão `Ctrl+Shift+V`), que continua de reserva.
+
+Desligar a opção, ou desinstalar, tira o `V` que o duplicata incluiu. Se ele
+ficar para trás (por exemplo, depois de apagar a configuração à mão), dá para
+tirar pelo Prompt de Comando:
+
+```bat
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v DisabledHotkeys
+```
+
+Se o valor for só `V`, apague-o:
+
+```bat
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v DisabledHotkeys /f
+```
+
+Se tiver outros caracteres (por exemplo `QRV`), grave-o sem o `V`:
+
+```bat
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v DisabledHotkeys /t REG_SZ /d QR /f
+```
+
+Depois, reinicie o Windows Explorer para o `Win+V` voltar ao histórico do
+Windows.
+
 ## Mais
 
 - [ARQUITETURA.md](ARQUITETURA.md) — como é feito por dentro, e por quê

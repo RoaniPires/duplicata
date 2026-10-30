@@ -3,9 +3,77 @@
 use std::fs;
 
 use duplicata_app::uninstall_cli::uninstall_data_at;
+use duplicata_core::testsupport::FakeDisabledHotkeys;
 
 fn seed(dir: &std::path::Path, name: &str) {
     fs::write(dir.join(name), b"conteudo de fixture").unwrap();
+}
+
+/// Registro sem `V`: os testes de antes não mexem nele.
+fn untouched() -> FakeDisabledHotkeys {
+    FakeDisabledHotkeys::with(None)
+}
+
+/// Nenhuma mensagem esperada: falha se o teste mostraria uma.
+fn no_message(message: &str) {
+    panic!("mensagem inesperada: {message:?}");
+}
+
+#[test]
+fn a_v_that_could_not_be_taken_back_is_reported_and_the_exit_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), OURS).unwrap();
+    let mut store = FakeDisabledHotkeys::with(Some("QRV"));
+    store.fail_write = true;
+    let shown = std::cell::RefCell::new(Vec::new());
+
+    let exit = uninstall_data_at(dir.path(), &|_| false, &mut store, &|m: &str| {
+        shown.borrow_mut().push(m.to_string())
+    });
+
+    assert_eq!(
+        shown.into_inner(),
+        vec![duplicata_core::settings_text::WIN_V_UNINSTALL_FAILED.to_string()]
+    );
+    assert_eq!(exit, 1, "algo ficou para trás");
+    assert_eq!(store.value.as_deref(), Some("QRV"));
+}
+
+const OURS: &str = "open_with_win_v = true\nwin_v_added_v = true\n";
+
+#[test]
+fn preserving_the_data_still_removes_our_v() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), OURS).unwrap();
+    let mut store = FakeDisabledHotkeys::with(Some("QRV"));
+
+    uninstall_data_at(dir.path(), &|_| false, &mut store, &no_message);
+
+    assert_eq!(store.value.as_deref(), Some("QR"));
+    assert!(dir.path().join("config.toml").exists());
+}
+
+#[test]
+fn deleting_the_data_removes_our_v_before_the_config_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), OURS).unwrap();
+    let mut store = FakeDisabledHotkeys::with(Some("QRV"));
+
+    uninstall_data_at(dir.path(), &|_| true, &mut store, &no_message);
+
+    assert_eq!(store.value.as_deref(), Some("QR"));
+    assert!(!dir.path().join("config.toml").exists());
+}
+
+#[test]
+fn without_the_config_the_v_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = FakeDisabledHotkeys::with(Some("V"));
+
+    uninstall_data_at(dir.path(), &|_| true, &mut store, &no_message);
+
+    assert_eq!(store.value.as_deref(), Some("V"));
+    assert_eq!(store.writes, 0);
 }
 
 #[test]
@@ -14,7 +82,12 @@ fn choosing_delete_removes_everything_and_reports_complete() {
     seed(dir.path(), "duplicata.db");
     seed(dir.path(), "config.toml");
 
-    let exit = uninstall_data_at(dir.path(), &|_history_protected| true);
+    let exit = uninstall_data_at(
+        dir.path(),
+        &|_history_protected| true,
+        &mut untouched(),
+        &no_message,
+    );
 
     assert_eq!(exit, 0, "remoção completa deve devolver 0");
     assert!(!dir.path().join("duplicata.db").exists());
@@ -27,7 +100,12 @@ fn choosing_preserve_leaves_everything_untouched() {
     seed(dir.path(), "duplicata.db");
     seed(dir.path(), "config.toml");
 
-    let exit = uninstall_data_at(dir.path(), &|_history_protected| false);
+    let exit = uninstall_data_at(
+        dir.path(),
+        &|_history_protected| false,
+        &mut untouched(),
+        &no_message,
+    );
 
     assert_eq!(exit, 0, "preservar também devolve 0 — nada deu errado");
     assert!(dir.path().join("duplicata.db").exists());
@@ -40,10 +118,15 @@ fn history_protected_flag_reflects_the_work_copy_presence() {
     seed(dir.path(), "duplicata.work.db");
 
     let seen = std::cell::Cell::new(None);
-    let exit = uninstall_data_at(dir.path(), &|history_protected| {
-        seen.set(Some(history_protected));
-        false
-    });
+    let exit = uninstall_data_at(
+        dir.path(),
+        &|history_protected| {
+            seen.set(Some(history_protected));
+            false
+        },
+        &mut untouched(),
+        &no_message,
+    );
 
     assert_eq!(exit, 0);
     assert_eq!(
@@ -85,6 +168,8 @@ fn end_to_end_with_the_real_dialog_deletes_when_the_user_confirms() {
     let exit = uninstall_data_at(
         dir.path(),
         &duplicata_win::uninstall_dialog::ask_delete_or_preserve,
+        &mut untouched(),
+        &no_message,
     );
     clicker.join().unwrap();
 
